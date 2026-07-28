@@ -1,0 +1,45 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# PPO agent configuration for the ASAP-style motion-tracking task (Template-G1-Isaac-ASAP-Motion-Direct-v0).
+#
+# Unlike the other agents/*.yaml files in this folder, this is NOT consumed by skrl/rsl_rl/rl_games/sb3 -
+# it's read directly (as a plain dict, via isaaclab_tasks' hydra_task_config) by scripts/asap/train.py and
+# play.py's own PPO implementation (scripts/asap/algo), ported from ASAP's
+# humanoidverse/config/algo/ppo.yaml + humanoidverse/agents/ppo/ppo.py. Field names/values below mirror
+# that file's `algo.config` block where possible.
+
+seed: 42
+
+# actor/critic network: plain MLPs (matches ASAP's ppo.yaml module_dict), built dynamically in
+# scripts/asap/train.py from the actual actor/critic observation dims returned by the env (see
+# G1AsapMotionEnv._get_observations / extras["observations"]["critic"]) rather than a fixed input_dim here.
+network:
+  hidden_dims: [512, 256, 128]
+  activation: elu
+  init_noise_std: 0.8  # initial actor Gaussian std (state-independent, learned per-action parameter)
+
+# PPO algorithm hyperparameters (see scripts/asap/algo/ppo.py)
+algorithm:
+  num_steps_per_env: 24 # rollout horizon per PPO update
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  clip_param: 0.2
+  gamma: 0.99
+  lam: 0.95
+  value_loss_coef: 1.0
+  entropy_coef: 0.01
+  actor_learning_rate: 1.0e-3
+  critic_learning_rate: 1.0e-3
+  max_grad_norm: 1.0
+  use_clipped_value_loss: true
+  schedule: adaptive # "adaptive" (KL-based) or "fixed"
+  desired_kl: 0.01
+
+# training loop / logging (see scripts/asap/train.py)
+runner:
+  num_iterations: 30000
+  save_interval: 100
+  experiment_name: g1_asap_motion

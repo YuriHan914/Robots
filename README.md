@@ -1,7 +1,7 @@
 # Robots
 
 <p align="center">
-  <img src="g1_isaac/assets/img/g1_motion_example.png" width="340"/>
+  <img src="g1_isaac/assets/img/g1_motion_example.png" width="420"/>
 </p>
 
 This project extracts human motion data from videos and uses it for imitation learning of Unitree G1 control policies.

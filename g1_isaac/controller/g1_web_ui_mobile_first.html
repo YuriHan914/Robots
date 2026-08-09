@@ -1,0 +1,1132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <title>G1 Robot Controller</title>
+
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg: oklch(16% 0.01 240);
+            --bg-header: oklch(12% 0.01 240);
+            --bg-card: oklch(20% 0.012 240);
+            --bg-well: oklch(12% 0.01 240);
+            --bg-sidebar: oklch(14% 0.012 240);
+            --border: rgba(255, 255, 255, 0.08);
+            --text: oklch(96% 0.004 240);
+            --text-dim: oklch(65% 0.01 240);
+            --text-dimmer: oklch(50% 0.01 240);
+            --text-dimmest: oklch(48% 0.01 240);
+            --cyan: oklch(72% 0.13 195);
+            --orange: oklch(72% 0.13 55);
+            --danger: oklch(62% 0.18 25);
+            --danger-bg: oklch(30% 0.1 25);
+            --success: oklch(68% 0.15 145);
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body {
+            height: 100vh;   /* fallback for browsers without dvh support */
+            height: 100dvh;  /* actual visible viewport on mobile - 100% ignores the collapsing address bar */
+            margin: 0;
+        }
+
+        body {
+            font-family: Inter, system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        /* ==================== header ==================== */
+        .header {
+            flex: none;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 clamp(12px, 4vw, 24px);
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-header);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--cyan);
+            flex-shrink: 0;
+        }
+
+        .app-title {
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            white-space: nowrap;
+        }
+
+        .unit-tag {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-dimmer);
+            padding-left: 12px;
+            border-left: 1px solid var(--border);
+            white-space: nowrap;
+        }
+
+        .session-timer {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-dim);
+            white-space: nowrap;
+        }
+
+        /* ==================== layout ==================== */
+        .main {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            /* wrap is the robust "never overlap" mechanism: once left-col's + sidebar's fixed
+               basis sizes no longer both fit, the sidebar drops to its own full-width row below
+               instead of being squeezed/overlapping - independent of any specific px breakpoint,
+               so it holds even in embedding contexts (e.g. an app webview) where a media query
+               might not evaluate the way a normal mobile browser would. */
+            flex-wrap: wrap;
+            overflow-y: auto;
+            overflow-x: hidden;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .left-col {
+            /* grow 1.35 (share leftover space), shrink 0 (never squeeze narrower than the basis -
+               forces a clean wrap to a new row instead), basis 480px (preferred width) */
+            flex: 1.35 0 480px;
+            min-width: 280px;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            /* centers the now fixed-size map/cam panels within any leftover space instead of
+               stretching them to fill it - enlarging the window just adds margin around them */
+            justify-content: center;
+            align-items: center;
+            gap: clamp(8px, 2.5vw, 14px);
+            padding: clamp(8px, 3vw, 16px);
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        .panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+        }
+
+        /* fixed aspect ratio, capped width - was flex:1 (stretched to fill all available left-col
+           height, growing indefinitely as the window grew). Now the panel's own size is capped by
+           max-width and derives its height from aspect-ratio, so it stops growing once it hits that
+           cap; .left-col's centering (above) absorbs any extra room as margin instead. */
+        .map-panel, .cam-panel {
+            flex: none;
+            width: 100%;
+            max-width: 480px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            flex: none;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            overflow: hidden;
+        }
+
+        .panel-title {
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .panel-meta {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-dimmer);
+            white-space: nowrap;
+        }
+
+        .cam-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-dimmer);
+            white-space: nowrap;
+        }
+
+        /* ==================== location map (radar) ==================== */
+        .radar-wrap {
+            /* was flex:1 (stretched to whatever height .map-panel became); now derives its own
+               height from its width via aspect-ratio, matching .map-panel's fixed-size behavior */
+            flex: none;
+            aspect-ratio: 1 / 1;
+            position: relative;
+            background: var(--bg-well);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+        }
+
+        .radar {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            max-width: 280px;
+            max-height: 280px;
+            aspect-ratio: 1;
+        }
+
+        .radar-ring { position: absolute; border-radius: 50%; border: 1px solid var(--border); }
+        .radar-ring.r1 { inset: 0; }
+        .radar-ring.r2 { inset: 38px; }
+        .radar-ring.r3 { inset: 76px; }
+
+        .radar-axis-h { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: rgba(255,255,255,0.06); }
+        .radar-axis-v { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: rgba(255,255,255,0.06); }
+
+        .radar-dot {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 14px;
+            height: 14px;
+            margin-left: -7px;
+            margin-top: -7px;
+        }
+
+        .radar-arrow {
+            width: 100%;
+            height: 100%;
+            clip-path: polygon(50% 0%, 100% 100%, 50% 76%, 0% 100%);
+            background: var(--cyan);
+            filter: drop-shadow(0 0 6px rgba(110, 220, 220, 0.7));
+        }
+
+        .radar { cursor: crosshair; touch-action: none; }
+
+        .radar-target {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 20px;
+            height: 20px;
+            margin-left: -10px;
+            margin-top: -10px;
+            display: none;
+            pointer-events: none;
+        }
+
+        .radar-target.visible { display: block; }
+        .radar-target-h { position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: var(--danger); transform: translateY(-50%); }
+        .radar-target-v { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: var(--danger); transform: translateX(-50%); }
+        .radar-target-ring { position: absolute; inset: 0; border: 2px solid var(--danger); border-radius: 50%; }
+
+        /* ==================== cam feed (live head camera, viewfinder chrome overlaid) ==================== */
+        /* outer wrap: derives a definite height from its own width (like .radar-wrap) and centers
+           the actual fixed-size .cam-frame inside it - was flex:1 (image stretched to fill whatever
+           height .cam-panel became, growing indefinitely with the window). */
+        .cam-view {
+            flex: none;
+            aspect-ratio: 4 / 3;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+        }
+
+        /* the actual fixed-size camera frame - stays exactly this size regardless of how big
+           .cam-view/.map-panel get; extra room becomes padding around it instead. */
+        .cam-frame {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            max-width: 480px;
+            max-height: 360px;
+            overflow: hidden;
+            background: repeating-linear-gradient(135deg, var(--bg-well) 0px, var(--bg-well) 18px, oklch(14% 0.012 240) 18px, oklch(14% 0.012 240) 36px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .cam-image {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .cam-corner { position: absolute; width: 22px; height: 22px; border-color: rgba(255,255,255,0.35); }
+        .cam-corner.tl { top: 14px; left: 14px; border-top: 2px solid; border-left: 2px solid; }
+        .cam-corner.tr { top: 14px; right: 14px; border-top: 2px solid; border-right: 2px solid; }
+        .cam-corner.bl { bottom: 14px; left: 14px; border-bottom: 2px solid; border-left: 2px solid; }
+        .cam-corner.br { bottom: 14px; right: 14px; border-bottom: 2px solid; border-right: 2px solid; }
+
+        .cam-cross-h { position: absolute; left: 50%; top: 50%; width: 26px; height: 1px; background: rgba(255,255,255,0.3); transform: translate(-50%, -50%); }
+        .cam-cross-v { position: absolute; left: 50%; top: 50%; width: 1px; height: 26px; background: rgba(255,255,255,0.3); transform: translate(-50%, -50%); }
+
+        .cam-placeholder {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.35);
+            letter-spacing: 0.5px;
+        }
+
+        .cam-status-dot {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--text-dimmer);
+            margin-right: 4px;
+        }
+
+        .cam-status-dot.live {
+            background: var(--success);
+            animation: connPulse 1.4s infinite;
+        }
+
+        /* ==================== sidebar ==================== */
+        .sidebar {
+            flex: none;
+            width: 420px;
+            min-width: 340px;
+            border-left: 1px solid var(--border);
+            background: var(--bg-sidebar);
+            padding: clamp(10px, 4vw, 18px);
+            display: flex;
+            flex-direction: column;
+            gap: clamp(8px, 2.5vw, 14px);
+            overflow-y: auto;
+            /* safety net, not a primary layout mechanism: if the sidebar's own content (e.g. both
+               joystick pads plus their gap) ever can't fit even after everything has already shrunk
+               as far as it fluidly goes, scroll sideways to reach it instead of clipping it. */
+            overflow-x: auto;
+        }
+
+        .sidebar .panel {
+            padding: 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+
+        .panel-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-dim);
+            letter-spacing: 0.4px;
+        }
+
+        /* ==================== connection status ==================== */
+        .conn-row { display: flex; align-items: center; justify-content: space-between; }
+        .conn-left { display: flex; align-items: center; gap: 8px; }
+
+        .conn-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: var(--danger);
+            color: var(--danger);
+            box-shadow: 0 0 8px currentColor;
+        }
+
+        .conn-dot.connected {
+            background: var(--success);
+            color: var(--success);
+            animation: connPulse 2s infinite;
+        }
+
+        .conn-label { font-size: 14px; font-weight: 600; }
+
+        @keyframes connPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+        /* ==================== joystick pads ==================== */
+        .pads { display: flex; gap: clamp(8px, 3vw, 16px); justify-content: space-around; }
+        .pad-col { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+        .pad-label { font-size: 11px; color: var(--text-dim); font-weight: 600; }
+
+        /* fluid diameter: scales with viewport instead of a fixed 120px that can force horizontal
+           overflow on narrow phones (two pads + gap could exceed the screen width) */
+        .pad {
+            position: relative;
+            width: clamp(72px, 26vw, 120px);
+            height: clamp(72px, 26vw, 120px);
+            border-radius: 50%;
+            background: var(--bg-well);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            cursor: grab;
+            touch-action: none;
+        }
+
+        .pad:active { cursor: grabbing; }
+
+        .pad-cross-h { position: absolute; left: 50%; top: 50%; width: 100%; height: 1px; background: rgba(255,255,255,0.06); transform: translate(-50%, -50%); }
+        .pad-cross-v { position: absolute; left: 50%; top: 50%; width: 1px; height: 100%; background: rgba(255,255,255,0.06); transform: translate(-50%, -50%); }
+        /* percentage-sized (was fixed px) so it scales together with .pad; centered purely via
+           transform (translateX/Y each resolve against the element's own width/height, unlike
+           margin percentages which both resolve against the *parent's width* - a common CSS trap
+           that would miscenter this vertically if done with margins instead) */
+        .pad-track {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 74%;
+            height: 22%;
+            border-radius: 100px;
+            background: rgba(255, 255, 255, 0.05);
+            transform: translate(-50%, -50%);
+        }
+
+        /* percentage-sized, single transform-based centering only - this previously also carried a
+           margin-left/top:-17px *in addition to* the transform, double-offsetting the knob visibly
+           away from true center (harmless-looking at a fixed 120px pad, but would only get more
+           obviously wrong once the pad's size became responsive) */
+        .pad-knob {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 28%;
+            height: 28%;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .move-knob { background: var(--cyan); box-shadow: 0 0 10px rgba(110, 220, 220, 0.6); }
+        .rot-knob { background: var(--orange); box-shadow: 0 0 10px rgba(220, 170, 110, 0.6); }
+
+        .pad-readout { font-family: var(--font-mono); font-size: 10px; color: var(--text-dimmest); }
+
+        /* ==================== basic actions ==================== */
+        .target-coords { display: flex; gap: 10px; }
+        .target-coords label { flex: 1; font-size: 11px; color: var(--text-dimmer); text-transform: uppercase; font-weight: 600; }
+        .target-coords input {
+            width: 100%;
+            margin-top: 4px;
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--bg-well);
+            color: var(--text);
+            font-size: 13px;
+            font-family: var(--font-mono);
+        }
+
+        .actions-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+        .action-btn {
+            background: var(--bg-well);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text);
+            padding: 12px 6px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            transition: background 0.15s, border-color 0.15s;
+        }
+
+        .action-btn:hover { border-color: rgba(110, 220, 220, 0.6); }
+        .action-btn.active { background: oklch(28% 0.05 195); border-color: var(--cyan); }
+        .action-btn-danger { background: var(--danger-bg); border-color: var(--danger); color: oklch(95% 0.01 25); }
+
+        /* ==================== motion / dance ==================== */
+        .dance-btn {
+            width: 100%;
+            padding: 13px;
+            border-radius: 100px;
+            cursor: pointer;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: var(--bg-well);
+            color: var(--text);
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            font-family: inherit;
+        }
+
+        .dance-btn.active {
+            border-color: var(--orange);
+            background: var(--orange);
+            color: oklch(14% 0.01 55);
+            animation: pulseRing 1.6s infinite;
+        }
+
+        .dance-meta { font-family: var(--font-mono); font-size: 10px; color: var(--text-dimmest); text-align: center; }
+
+        @keyframes pulseRing {
+            0% { box-shadow: 0 0 0 0 rgba(110, 220, 220, 0.45); }
+            70% { box-shadow: 0 0 0 14px rgba(110, 220, 220, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(110, 220, 220, 0); }
+        }
+
+        /* ==================== robot status ==================== */
+        .status-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .status-label { font-size: 20px; font-weight: 700; }
+        .status-time { font-family: var(--font-mono); font-size: 11px; color: var(--text-dimmest); margin-top: 2px; }
+        .history-chips { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+        .history-chip {
+            font-size: 10px;
+            font-family: var(--font-mono);
+            color: oklch(55% 0.01 240);
+            background: rgba(255, 255, 255, 0.06);
+            padding: 4px 8px;
+            border-radius: 100px;
+            white-space: nowrap;
+        }
+
+        .mini-status { display: flex; gap: 14px; align-items: center; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 12px; }
+        .mini-radar { position: relative; width: clamp(64px, 22vw, 96px); height: clamp(64px, 22vw, 96px); flex: none; }
+        .mini-ring { position: absolute; border-radius: 50%; border: 1px solid var(--border); }
+        .mini-ring.r1 { inset: 0; }
+        .mini-ring.r2 { inset: 22px; }
+        .mini-axis-h { position: absolute; left: 50%; top: 50%; width: 100%; height: 1px; background: rgba(255,255,255,0.06); transform: translate(-50%, -50%); }
+        .mini-axis-v { position: absolute; left: 50%; top: 50%; width: 1px; height: 100%; background: rgba(255,255,255,0.06); transform: translate(-50%, -50%); }
+        .mini-dot { position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin-left: -5px; margin-top: -5px; }
+        .mini-arrow { width: 100%; height: 100%; clip-path: polygon(50% 0%, 100% 100%, 50% 76%, 0% 100%); background: var(--cyan); }
+        .mini-readout { font-family: var(--font-mono); font-size: 12px; color: oklch(70% 0.01 240); display: flex; flex-direction: column; gap: 5px; }
+
+        /* ==================== toast ==================== */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            z-index: 2000;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(300px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        /* ==================== narrow-screen fallback ==================== */
+        /* One rule, deliberately orientation-agnostic: below this width, never deform the fixed-size
+           plots (radar/cam stay at their real max-width/max-height) and never try to cleverly
+           squeeze the sidebar's content narrower than it wants to be - just stack .left-col above
+           .sidebar (both full width) and let the page scroll (vertically for the stacked column,
+           horizontally on .sidebar as a safety net - see below) to reach whatever doesn't fit. A
+           previous attempt special-cased short landscape phones to keep them side-by-side and shrink
+           the plots to fill the available (limited) height instead - that's what was making them
+           look flat/squashed. Scrolling to see a fixed-size, correctly-proportioned plot beats
+           deforming it to avoid scrolling.
+           .main's flex-wrap (base rule, above) is what actually guarantees "never overlap": once
+           .left-col's + .sidebar's combined basis no longer fits the available width, .sidebar wraps
+           onto its own row below .left-col automatically - regardless of the exact width that
+           happens at, which is what makes it robust to embedding contexts (e.g. an app webview)
+           where this max-width query's threshold might not line up exactly with where wrapping is
+           actually needed. */
+        @media (max-width: 940px) {
+            /* .left-col previously kept flex-shrink:0 (correct for the desktop wrap-vs-squeeze
+               decision above) even after wrapping onto its own row here, so it refused to shrink
+               narrower than its 480px basis - overflowing/clipping on any phone narrower than that,
+               which is exactly why the map/cam column wasn't adapting to mobile width the way the
+               sidebar already did below. */
+            .left-col { flex: 1 1 100%; min-width: 0; max-width: 100%; }
+            .sidebar { width: 100%; min-width: 0; flex-basis: 100%; border-left: none; border-top: 1px solid var(--border); }
+            .unit-tag { display: none; }
+        }
+    </style>
+</head>
+<body>
+    <!-- header -->
+    <div class="header">
+        <div class="header-left">
+            <div class="pulse-dot"></div>
+            <div class="app-title">ROBOT CONTROLLER</div>
+            <div class="unit-tag">UNIT &middot; G1</div>
+        </div>
+        <div class="session-timer" id="sessionTimer">SESSION 00:00:00</div>
+    </div>
+
+    <!-- main -->
+    <div class="main">
+        <div class="left-col">
+            <!-- location map -->
+            <div class="panel map-panel">
+                <div class="panel-header">
+                    <div class="panel-title">LOCATION MAP</div>
+                    <div class="panel-meta" id="mapReadout">X 0.0m &nbsp;Y 0.0m &nbsp;HDG 0&deg;</div>
+                </div>
+                <div class="radar-wrap">
+                    <div class="radar" id="radar" title="Click to set target (x, y)">
+                        <div class="radar-ring r1"></div>
+                        <div class="radar-ring r2"></div>
+                        <div class="radar-ring r3"></div>
+                        <div class="radar-axis-h"></div>
+                        <div class="radar-axis-v"></div>
+                        <div class="radar-target" id="radarTarget">
+                            <div class="radar-target-ring"></div>
+                            <div class="radar-target-h"></div>
+                            <div class="radar-target-v"></div>
+                        </div>
+                        <div class="radar-dot" id="radarDot">
+                            <div class="radar-arrow" id="radarArrow"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- cam feed (no real camera wired up - decorative placeholder only) -->
+            <div class="panel cam-panel">
+                <div class="panel-header">
+                    <div class="panel-title">CAM FEED</div>
+                    <div class="cam-status"><span class="cam-status-dot" id="camStatusDot"></span><span id="camStatusText">NO SIGNAL</span></div>
+                </div>
+                <div class="cam-view">
+                    <div class="cam-frame">
+                        <img class="cam-image" id="camImage" alt="" style="display:none;">
+                        <div class="cam-corner tl"></div>
+                        <div class="cam-corner tr"></div>
+                        <div class="cam-corner bl"></div>
+                        <div class="cam-corner br"></div>
+                        <div class="cam-cross-h"></div>
+                        <div class="cam-cross-v"></div>
+                        <div class="cam-placeholder" id="camPlaceholder">CAMERA NOT CONNECTED</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- sidebar -->
+        <div class="sidebar">
+            <!-- connection status -->
+            <div class="panel">
+                <div class="panel-label">CONNECTION STATUS</div>
+                <div class="conn-row">
+                    <div class="conn-left">
+                        <div class="conn-dot" id="statusDot"></div>
+                        <div class="conn-label" id="statusText">Connecting...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- joystick controls -->
+            <div class="panel">
+                <div class="panel-label">JOYSTICK CONTROLS</div>
+                <div class="pads">
+                    <div class="pad-col">
+                        <div class="pad-label">MOVE</div>
+                        <div class="pad" id="movePad">
+                            <div class="pad-cross-h"></div>
+                            <div class="pad-cross-v"></div>
+                            <div class="pad-knob move-knob" id="moveKnob"></div>
+                        </div>
+                        <div class="pad-readout" id="moveReadout">x0.00 y0.00</div>
+                    </div>
+                    <div class="pad-col">
+                        <div class="pad-label">ROTATE</div>
+                        <div class="pad" id="rotPad">
+                            <div class="pad-track"></div>
+                            <div class="pad-knob rot-knob" id="rotKnob"></div>
+                        </div>
+                        <div class="pad-readout" id="rotReadout">yaw0.00</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- basic actions -->
+            <div class="panel">
+                <div class="panel-label">BASIC ACTIONS</div>
+                <div class="target-coords">
+                    <label>X (m)<input type="number" id="targetX" step="0.1" value="0.0"></label>
+                    <label>Y (m)<input type="number" id="targetY" step="0.1" value="0.0"></label>
+                </div>
+                <div class="actions-grid">
+                    <button class="action-btn" id="btnStand" onclick="doStand()">Stand</button>
+                    <button class="action-btn" id="btnWalk" onclick="doWalk()">Walk</button>
+                    <button class="action-btn" id="btnRun" onclick="doRun()">Run</button>
+                    <button class="action-btn" id="btnHome" onclick="doHome()">Home</button>
+                    <button class="action-btn action-btn-danger" id="btnStop" onclick="doStop()">Stop</button>
+                    <button class="action-btn" id="btnReset" onclick="doReset()">Reset</button>
+                </div>
+            </div>
+
+            <!-- motion -->
+            <div class="panel">
+                <div class="panel-label">MOTION</div>
+                <button class="dance-btn" id="danceBtn" onclick="toggleDance()">&#9834;&nbsp; Dance 1</button>
+                <div class="dance-meta" id="danceMeta">Not loaded yet</div>
+            </div>
+
+            <!-- robot status -->
+            <div class="panel">
+                <div class="panel-label">ROBOT STATUS</div>
+                <div class="status-row">
+                    <div>
+                        <div class="status-label" id="currentActionLabel">Standby</div>
+                        <div class="status-time" id="secondsAgoLabel">0s ago</div>
+                    </div>
+                    <div class="history-chips" id="historyChips"></div>
+                </div>
+                <div class="mini-status">
+                    <div class="mini-radar">
+                        <div class="mini-ring r1"></div>
+                        <div class="mini-ring r2"></div>
+                        <div class="mini-axis-h"></div>
+                        <div class="mini-axis-v"></div>
+                        <div class="mini-dot" id="miniDot">
+                            <div class="mini-arrow" id="miniArrow"></div>
+                        </div>
+                    </div>
+                    <div class="mini-readout">
+                        <div>X &nbsp;&nbsp;<span id="infoPoseX">0.0</span> m</div>
+                        <div>Y &nbsp;&nbsp;<span id="infoPoseY">0.0</span> m</div>
+                        <div>HDG <span id="infoHeading">0</span>&deg;</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ==================== socket.io ====================
+        const socket = io();
+
+        // both stages must be up for a real "connected" state: browser<->web-server (isConnected)
+        // and web-server<->Isaac Sim (simConnected, from g1/status DDS telemetry - see
+        // unitree_g1_web_controller_complete.py's watchdog).
+        let isConnected = false;
+        let simConnected = false;
+        let dancePlaying = false;
+        let robotPose = { x: 0, y: 0, z: 0, heading: 0 };
+        let lastDistance = null;
+
+        socket.on('connect', () => { isConnected = true; updateConnectionStatus(); });
+        socket.on('disconnect', () => { isConnected = false; simConnected = false; updateConnectionStatus(); });
+        socket.on('response', (data) => console.log('response:', data));
+
+        socket.on('status', (data) => {
+            if (typeof data.connected_to_sim === 'boolean') {
+                simConnected = data.connected_to_sim;
+                updateConnectionStatus();
+            }
+            const mode = data.mode || 'stand';
+            const gait = data.gait || 'stand';
+            dancePlaying = (mode === 'policy');
+            updateActionState(mode, gait);
+            updateDanceMeta(!!data.policy_loaded);
+            lastDistance = (data.distance_to_target === null || data.distance_to_target === undefined) ? null : data.distance_to_target;
+            renderMapMeta();
+        });
+
+        socket.on('robot_pose', (pose) => {
+            robotPose = pose;
+            document.getElementById('infoPoseX').textContent = pose.x.toFixed(1);
+            document.getElementById('infoPoseY').textContent = pose.y.toFixed(1);
+            document.getElementById('infoHeading').textContent = Math.round(pose.heading || 0);
+            updateRadar();
+            renderMapMeta();
+        });
+
+        // head camera - the sim only publishes a frame if it actually mounted a camera
+        // (g1_isaac_sim_bridge.py, skipped when run with --no_camera)
+        let lastCamFrameTime = 0;
+        socket.on('camera_frame', (data) => {
+            lastCamFrameTime = Date.now();
+            const img = document.getElementById('camImage');
+            img.src = `data:image/jpeg;base64,${data.jpeg_base64}`;
+            img.style.display = 'block';
+            document.getElementById('camPlaceholder').style.display = 'none';
+            document.getElementById('camStatusDot').classList.add('live');
+            document.getElementById('camStatusText').textContent = 'LIVE';
+        });
+
+        // if frames stop arriving (sim died, camera skipped, etc.) fall back to the placeholder
+        setInterval(() => {
+            if (lastCamFrameTime === 0) return;
+            if (Date.now() - lastCamFrameTime > 3000) {
+                document.getElementById('camImage').style.display = 'none';
+                document.getElementById('camPlaceholder').style.display = 'block';
+                document.getElementById('camPlaceholder').textContent = 'CAMERA SIGNAL LOST';
+                document.getElementById('camStatusDot').classList.remove('live');
+                document.getElementById('camStatusText').textContent = 'NO SIGNAL';
+                lastCamFrameTime = 0;
+            }
+        }, 1000);
+
+        function updateConnectionStatus() {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            if (isConnected && simConnected) {
+                dot.classList.add('connected');
+                text.textContent = 'Connected';
+            } else if (isConnected) {
+                dot.classList.remove('connected');
+                text.textContent = 'Simulator disconnected';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        // ==================== radar (location map + mini status radar) ====================
+        const RADAR_SCALE = 3.0;     // px per meter for the main radar's position mapping
+        const RADAR_CLAMP_PX = 118;  // matches the ~280px radar's visible radius minus margin
+
+        function clampVal(v, lim) { return Math.max(-lim, Math.min(lim, v)); }
+
+        function updateRadar() {
+            // world yaw is measured CCW from +X; the map is drawn with +Y up and the arrow's
+            // resting (0deg) orientation already points "up" (+Y) - so screen rotation = 90 - yaw.
+            const arrowDeg = 90 - (robotPose.heading || 0);
+
+            const mainX = clampVal(robotPose.x * RADAR_SCALE, RADAR_CLAMP_PX);
+            const mainY = clampVal(-robotPose.y * RADAR_SCALE, RADAR_CLAMP_PX);
+            document.getElementById('radarDot').style.transform = `translate(${mainX}px, ${mainY}px)`;
+            document.getElementById('radarArrow').style.transform = `rotate(${arrowDeg}deg)`;
+
+            const miniX = clampVal(robotPose.x * RADAR_SCALE * 0.5, 40);
+            const miniY = clampVal(-robotPose.y * RADAR_SCALE * 0.5, 40);
+            document.getElementById('miniDot').style.transform = `translate(${miniX}px, ${miniY}px)`;
+            document.getElementById('miniArrow').style.transform = `rotate(${arrowDeg}deg)`;
+        }
+
+        function renderMapMeta() {
+            let text = `X ${robotPose.x.toFixed(1)}m &nbsp;Y ${robotPose.y.toFixed(1)}m &nbsp;HDG ${Math.round(robotPose.heading || 0)}&deg;`;
+            if (lastDistance !== null) text += ` &nbsp;&rarr;${lastDistance.toFixed(1)}m`;
+            document.getElementById('mapReadout').innerHTML = text;
+        }
+
+        // ==================== click-to-set target on the location map ====================
+        let targetMarker = null;  // { x, y } in world meters, or null if not set
+
+        function updateTargetMarkerPosition() {
+            const el = document.getElementById('radarTarget');
+            if (!targetMarker) { el.classList.remove('visible'); return; }
+            el.classList.add('visible');
+            const x = clampVal(targetMarker.x * RADAR_SCALE, RADAR_CLAMP_PX);
+            const y = clampVal(-targetMarker.y * RADAR_SCALE, RADAR_CLAMP_PX);
+            el.style.transform = `translate(${x}px, ${y}px)`;
+        }
+
+        function setTargetFromInputs() {
+            targetMarker = {
+                x: parseFloat(document.getElementById('targetX').value) || 0,
+                y: parseFloat(document.getElementById('targetY').value) || 0,
+            };
+            updateTargetMarkerPosition();
+        }
+
+        function setTargetFromRadarClick(clientX, clientY) {
+            const radarEl = document.getElementById('radar');
+            const rect = radarEl.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            // scale the click radius the same way the radar's own max-width:280px reference does,
+            // so a click lands exactly where the dot/marker will actually be drawn at this size.
+            const maxRadiusPx = (rect.width / 2) * (RADAR_CLAMP_PX / 140);
+            let dx = clientX - cx;
+            let dy = clientY - cy;
+            const dist = Math.hypot(dx, dy);
+            if (dist > maxRadiusPx) {
+                const ratio = maxRadiusPx / dist;
+                dx *= ratio; dy *= ratio;
+            }
+            const worldX = dx / RADAR_SCALE;
+            const worldY = -dy / RADAR_SCALE;
+            document.getElementById('targetX').value = worldX.toFixed(2);
+            document.getElementById('targetY').value = worldY.toFixed(2);
+            targetMarker = { x: worldX, y: worldY };
+            updateTargetMarkerPosition();
+        }
+
+        const radarEl = document.getElementById('radar');
+        radarEl.addEventListener('click', (e) => setTargetFromRadarClick(e.clientX, e.clientY));
+        radarEl.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const t = e.touches[0];
+            setTargetFromRadarClick(t.clientX, t.clientY);
+        }, { passive: false });
+
+        document.getElementById('targetX').addEventListener('change', setTargetFromInputs);
+        document.getElementById('targetY').addEventListener('change', setTargetFromInputs);
+
+        // ==================== joystick pads (pointer-drag) ====================
+        class DragPad {
+            constructor(padId, knobId, isRotate, onMove) {
+                this.pad = document.getElementById(padId);
+                this.knob = document.getElementById(knobId);
+                this.isRotate = isRotate;
+                this.onMove = onMove;
+                this.dragging = false;
+                this.pad.addEventListener('pointerdown', (e) => this.start(e));
+                window.addEventListener('pointermove', (e) => this.move(e));
+                window.addEventListener('pointerup', () => this.end());
+            }
+
+            start(e) {
+                e.preventDefault();
+                this.dragging = true;
+                this.update(e);
+            }
+
+            move(e) {
+                if (!this.dragging) return;
+                this.update(e);
+            }
+
+            end() {
+                if (!this.dragging) return;
+                this.dragging = false;
+                this.knob.style.transform = 'translate(-50%, -50%)';
+                this.onMove(0, 0);
+            }
+
+            // called from the action buttons (Reset/Home/Stop): pointerup can be missed - most
+            // commonly on touch (an interrupted/lost touch never fires it) but also possible with a
+            // fast mouse move off the pad - which leaves `dragging` stuck true. window's pointermove
+            // listener keeps firing wherever the pointer goes next (including right over the button
+            // being clicked), so a stale drag can silently re-send nonzero cmd_vel immediately after
+            // - or even during - a reset, which looks exactly like "reset did nothing".
+            forceRelease() {
+                if (this.dragging) this.end();
+            }
+
+            update(e) {
+                const rect = this.pad.getBoundingClientRect();
+                const cx = rect.left + rect.width / 2;
+                const cy = rect.top + rect.height / 2;
+                // knob radius read live (it's now a % of the pad's own size, which is itself fluid
+                // via clamp()) so the knob's travel range stays correct at any pad size instead of
+                // assuming the old fixed 120px pad / 34px knob combination.
+                const knobRadius = this.knob.getBoundingClientRect().width / 2;
+                const radius = rect.width / 2 - knobRadius;
+                let dx = (e.clientX - cx) / radius;
+                let dy = (e.clientY - cy) / radius;
+                if (this.isRotate) dy = 0;
+                const mag = Math.hypot(dx, dy);
+                if (mag > 1) { dx /= mag; dy /= mag; }
+                this.knob.style.transform = `translate(calc(-50% + ${dx * radius}px), calc(-50% + ${dy * radius}px))`;
+                this.onMove(dx, dy);
+            }
+        }
+
+        let velocityX = 0, velocityY = 0, angularZ = 0;
+
+        const movePad = new DragPad('movePad', 'moveKnob', false, (dx, dy) => {
+            velocityX = -dy * 2.0;  // drag up = forward
+            velocityY = dx * 1.0;   // reference only - no strafing gait on the sim side
+            document.getElementById('moveReadout').textContent = `x${dx.toFixed(2)} y${dy.toFixed(2)}`;
+            sendCommand();
+        });
+
+        const rotPad = new DragPad('rotPad', 'rotKnob', true, (dx) => {
+            angularZ = dx * 1.0;
+            document.getElementById('rotReadout').textContent = `yaw${dx.toFixed(2)}`;
+            sendCommand();
+        });
+
+        function releaseAllPads() {
+            movePad.forceRelease();
+            rotPad.forceRelease();
+        }
+
+        function sendCommand() {
+            if (!isConnected) return;
+            socket.emit('cmd_vel', { linear_x: velocityX, linear_y: velocityY, angular_z: angularZ });
+        }
+
+        // ==================== basic actions ====================
+        function currentTarget() {
+            return {
+                x: parseFloat(document.getElementById('targetX').value) || 0,
+                y: parseFloat(document.getElementById('targetY').value) || 0,
+            };
+        }
+
+        function doStand() {
+            velocityX = 0; velocityY = 0; angularZ = 0;
+            sendCommand();
+        }
+
+        function doWalk() {
+            const t = currentTarget();
+            socket.emit('goto_target', { x: t.x, y: t.y, gait: 'walk' });
+            showToast(`Walking to (${t.x.toFixed(2)}, ${t.y.toFixed(2)})`);
+        }
+
+        function doRun() {
+            const t = currentTarget();
+            socket.emit('goto_target', { x: t.x, y: t.y, gait: 'run' });
+            showToast(`Running to (${t.x.toFixed(2)}, ${t.y.toFixed(2)})`);
+        }
+
+        function doStop() {
+            releaseAllPads();
+            velocityX = 0; velocityY = 0; angularZ = 0;
+            sendCommand();
+            socket.emit('cancel_goto', {});
+            socket.emit('emergency_stop', {});
+            showToast('Emergency stop');
+        }
+
+        function doHome() {
+            releaseAllPads();
+            velocityX = 0; velocityY = 0; angularZ = 0;
+            sendCommand();
+            socket.emit('home_position', {});
+            showToast('Returning home...');
+        }
+
+        function doReset() {
+            releaseAllPads();
+            velocityX = 0; velocityY = 0; angularZ = 0;
+            sendCommand();
+            socket.emit('cancel_goto', {});
+            socket.emit('reset_sim', {});
+            showToast('Resetting simulation (no auto-reset on fall - use this button)');
+        }
+
+        // ==================== motion / dance ====================
+        function toggleDance() {
+            if (dancePlaying) socket.emit('stop_policy', {});
+            else socket.emit('play_policy', {});
+        }
+
+        function updateDanceMeta(policyLoaded) {
+            const btn = document.getElementById('danceBtn');
+            const meta = document.getElementById('danceMeta');
+            if (dancePlaying) {
+                btn.classList.add('active');
+                meta.textContent = 'Playing';
+            } else {
+                btn.classList.remove('active');
+                meta.textContent = policyLoaded ? 'Ready' : 'Not loaded yet (loads on first play)';
+            }
+        }
+
+        // ==================== robot status (server-driven, real state transitions) ====================
+        let lastActionLabel = null;
+        let actionChangedAt = Date.now();
+        let historyList = [];
+
+        function actionLabelFor(mode, gait) {
+            if (mode === 'policy') return 'Playing Dance 1';
+            if (mode === 'goto') return gait === 'run' ? 'Running to target' : 'Walking to target';
+            if (mode === 'manual') return gait === 'run' ? 'Running' : 'Walking';
+            return 'Standing';
+        }
+
+        function updateActionState(mode, gait) {
+            const label = actionLabelFor(mode, gait);
+            if (label !== lastActionLabel) {
+                if (lastActionLabel !== null) {
+                    historyList.unshift(lastActionLabel);
+                    historyList = historyList.slice(0, 4);
+                    renderHistory();
+                }
+                lastActionLabel = label;
+                actionChangedAt = Date.now();
+                document.getElementById('currentActionLabel').textContent = label;
+            }
+            updateActiveButtons(mode, gait);
+        }
+
+        function renderHistory() {
+            const el = document.getElementById('historyChips');
+            el.innerHTML = '';
+            historyList.forEach((label) => {
+                const chip = document.createElement('div');
+                chip.className = 'history-chip';
+                chip.textContent = label;
+                el.appendChild(chip);
+            });
+        }
+
+        function updateActiveButtons(mode, gait) {
+            ['btnStand', 'btnWalk', 'btnRun'].forEach((id) => document.getElementById(id).classList.remove('active'));
+            if (mode === 'stand') document.getElementById('btnStand').classList.add('active');
+            else if (mode === 'manual' || mode === 'goto') document.getElementById(gait === 'run' ? 'btnRun' : 'btnWalk').classList.add('active');
+        }
+
+        setInterval(() => {
+            const secs = Math.max(0, Math.round((Date.now() - actionChangedAt) / 1000));
+            document.getElementById('secondsAgoLabel').textContent = secs + 's ago';
+        }, 1000);
+
+        // ==================== session timer (real elapsed time since page load) ====================
+        const pageLoadTime = Date.now();
+        function pad2(n) { return String(n).padStart(2, '0'); }
+        setInterval(() => {
+            const elapsed = Math.floor((Date.now() - pageLoadTime) / 1000);
+            const hh = Math.floor(elapsed / 3600);
+            const mm = Math.floor((elapsed % 3600) / 60);
+            const ss = elapsed % 60;
+            document.getElementById('sessionTimer').textContent = `SESSION ${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
+        }, 1000);
+
+        // ==================== toast ====================
+        function showToast(message) {
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                setTimeout(() => toast.remove(), 300);
+            }, 2000);
+        }
+
+        // ==================== init ====================
+        updateConnectionStatus();
+        updateActionState('stand', 'stand');
+        renderMapMeta();
+
+        document.addEventListener('dblclick', () => {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch((err) => console.log('fullscreen failed:', err));
+            } else {
+                document.exitFullscreen();
+            }
+        });
+    </script>
+</body>
+</html>

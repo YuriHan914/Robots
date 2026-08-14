@@ -1,0 +1,87 @@
+# slam_toolbox online_async params for the g1_isaac head-lidar SLAM pipeline.
+#
+# Frame ids / scan_topic below must match what ros2_slam_bridge.py publishes (see that file's
+# _on_lidar_scan/_on_robot_pose): scan_topic="/scan" (frame_id "base_link"), odom_frame="odom"
+# (published there as the odom -> base_link tf from the sim's ground-truth robot_pose). slam_toolbox
+# publishes map -> odom itself - the bridge never touches that half of the chain.
+#
+# max_laser_range/min_laser_range match g1_isaac_sim_bridge.py's LIDAR_MAX_RANGE/LIDAR_RANGE_MIN
+# constants. resolution=0.05 (5cm/cell) is a reasonable default for the ~14x14m room _spawn_room
+# builds - tune alongside room size if that changes.
+#
+# Launch with (note the launch file's own argument is "slam_params_file", not "params_file" - and
+# online_async_launch.py's "use_sim_time" launch arg (default true) is applied *after* this file's
+# own ros__parameters and wins, so use_sim_time can only be set below to false via that argument,
+# not from this yaml - see g1_isaac_sim_bridge.py, which publishes real wall-clock-ish telemetry,
+# no /clock topic exists here):
+#   ros2 launch slam_toolbox online_async_launch.py \
+#       slam_params_file:=controller/slam_toolbox_params.yaml use_sim_time:=false
+
+slam_toolbox:
+  ros__parameters:
+    # Plugin params
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # ROS parameters
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /scan
+    mode: mapping
+    # use_sim_time is NOT set here - online_async_launch.py's own "use_sim_time" launch argument
+    # always overrides whatever this file says (see the header comment above) - pass
+    # use_sim_time:=false on the ros2 launch command line instead.
+
+    debug_logging: false
+    throttle_scans: 1
+    transform_publish_period: 0.02
+    map_update_interval: 1.0
+    resolution: 0.05
+    min_laser_range: 0.1
+    max_laser_range: 20.0
+    minimum_time_interval: 0.2
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true
+
+    # General parameters
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.2
+    minimum_travel_heading: 0.2
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+    loop_search_maximum_distance: 3.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    # Correlation parameters - correlation
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    # Correlation parameters - loop closure
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # Scan matcher parameters
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true

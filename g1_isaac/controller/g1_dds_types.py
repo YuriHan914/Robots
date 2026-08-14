@@ -144,6 +144,34 @@ class CameraFrame(IdlStruct, typename="g1.CameraFrame"):
     jpeg_base64: str = ""
 
 
+@dataclass
+class LidarScan(IdlStruct, typename="g1.LidarScan"):
+    """One 360-degree horizontal sweep from the head lidar, world-frame ranges (meters). Field
+    layout deliberately mirrors ROS 2's sensor_msgs/LaserScan so the (separate, non-conda)
+    ros2_slam_bridge.py process can copy fields 1:1 into a LaserScan with no resampling."""
+
+    angle_min: float = 0.0
+    angle_max: float = 0.0
+    angle_increment: float = 0.0
+    range_min: float = 0.0
+    range_max: float = 0.0
+    ranges: sequence[float] = field(default_factory=list)
+
+
+@dataclass
+class OccupancyMap(IdlStruct, typename="g1.OccupancyMap"):
+    """SLAM occupancy grid built by slam_toolbox (via ros2_slam_bridge.py), PNG-encoded and
+    base64ed the same way CameraFrame carries JPEG - the web relay/browser need no grid-decoding
+    logic of their own, just an <img src>."""
+
+    width: int = 0
+    height: int = 0
+    resolution: float = 0.0  # meters/cell
+    origin_x: float = 0.0  # world (env-origin-relative) x of cell (0, 0)
+    origin_y: float = 0.0
+    png_base64: str = ""
+
+
 TOPIC_CMD_VEL = "g1/cmd_vel"
 TOPIC_GOTO_COMMAND = "g1/goto_command"
 TOPIC_GOTO_CANCEL = "g1/goto_cancel"
@@ -155,3 +183,5 @@ TOPIC_ROBOT_POSE = "g1/robot_pose"
 TOPIC_JOINT_STATES = "g1/joint_states"
 TOPIC_STATUS = "g1/status"
 TOPIC_CAMERA_FRAME = "g1/camera_frame"
+TOPIC_LIDAR_SCAN = "g1/lidar_scan"
+TOPIC_OCCUPANCY_MAP = "g1/occupancy_map"

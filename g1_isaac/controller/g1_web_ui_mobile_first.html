@@ -213,6 +213,23 @@
             aspect-ratio: 1;
         }
 
+        /* SLAM occupancy-grid map (see applyOccupancyMap()): anchored at the radar's center like
+           radar-dot, but positioned/sized via an inline transform computed from the map's own
+           resolution/origin (RADAR_SCALE px/meter, same as the arrow) - so it lines up exactly
+           with the coordinate frame the arrow already moves in. Only updates when a new
+           occupancy_map event arrives, i.e. stays fixed the rest of the time; the rings stay on
+           top as a faint reference grid. */
+        .radar-map-img {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            image-rendering: pixelated;
+            pointer-events: none;
+            opacity: 0.85;
+            display: none;
+        }
+        .radar-map-img.visible { display: block; }
+
         .radar-ring { position: absolute; border-radius: 50%; border: 1px solid var(--border); }
         .radar-ring.r1 { inset: 0; }
         .radar-ring.r2 { inset: 38px; }
@@ -597,6 +614,7 @@
                 </div>
                 <div class="radar-wrap">
                     <div class="radar" id="radar" title="Click to set target (x, y)">
+                        <img class="radar-map-img" id="radarMapImg" alt="">
                         <div class="radar-ring r1"></div>
                         <div class="radar-ring r2"></div>
                         <div class="radar-ring r3"></div>
@@ -779,6 +797,12 @@
             document.getElementById('camStatusText').textContent = 'LIVE';
         });
 
+        // SLAM occupancy-grid map - published once slam_toolbox has built up enough of a map (see
+        // ros2_slam_bridge.py); the image only updates when a new one arrives, so it stays fixed on
+        // screen the rest of the time and only the arrow (updateRadar(), driven by robot_pose)
+        // moves on top of it.
+        socket.on('occupancy_map', applyOccupancyMap);
+
         // if frames stop arriving (sim died, camera skipped, etc.) fall back to the placeholder
         setInterval(() => {
             if (lastCamFrameTime === 0) return;
@@ -812,6 +836,24 @@
         const RADAR_CLAMP_PX = 118;  // matches the ~280px radar's visible radius minus margin
 
         function clampVal(v, lim) { return Math.max(-lim, Math.min(lim, v)); }
+
+        // world (origin_x, origin_y) is the map's cell-(0,0) corner (bottom-left, standard
+        // nav_msgs/OccupancyGrid convention) - but the PNG ros2_slam_bridge.py sends is already
+        // flipped vertically to image convention (row 0 = top), so the image's top-left corner is
+        // the map's *top*-left world corner: (origin_x, origin_y + height*resolution). Same
+        // RADAR_SCALE/sign convention as updateRadar()'s mainX/mainY (+Y world = up on screen).
+        function applyOccupancyMap(data) {
+            const img = document.getElementById('radarMapImg');
+            img.src = `data:image/png;base64,${data.png_base64}`;
+            const widthPx = data.width * data.resolution * RADAR_SCALE;
+            const heightPx = data.height * data.resolution * RADAR_SCALE;
+            const topLeftX = data.origin_x * RADAR_SCALE;
+            const topLeftY = -(data.origin_y + data.height * data.resolution) * RADAR_SCALE;
+            img.style.width = `${widthPx}px`;
+            img.style.height = `${heightPx}px`;
+            img.style.transform = `translate(${topLeftX}px, ${topLeftY}px)`;
+            img.classList.add('visible');
+        }
 
         function updateRadar() {
             // world yaw is measured CCW from +X; the map is drawn with +Y up and the arrow's

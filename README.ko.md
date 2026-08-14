@@ -1,5 +1,7 @@
 # Robots
 
+*[English](README.md)*
+
 <p align="center">
   <img src="g1_isaac/assets/img/g1_motion_example.png" width="520"/>
 </p>

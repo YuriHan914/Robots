@@ -1,5 +1,7 @@
 # Robots
 
+*[한국어](README.ko.md)*
+
 <p align="center">
   <img src="g1_isaac/assets/img/g1_motion_example.png" width="520"/>
 </p>
@@ -13,7 +15,8 @@ The `g1_isaac` folder is the main training and evaluation workspace in this repo
 It contains an Isaac Sim + Isaac Lab based pipeline for developing locomotion and motion-imitation
 policies for the Unitree G1 humanoid robot.
 
-### Core Setup
+
+<h3 style="display: flex; align-items: center; gap: 0.75em; margin-top: 1.5em; line-height: 1.5;">Core Setup <span style="display: block; flex: 1; height: 1px; background: #6b7280; opacity: 0.9;"></span></h3>
 
 - Simulator: Isaac Sim
 - Framework: Isaac Lab
@@ -21,14 +24,33 @@ policies for the Unitree G1 humanoid robot.
 - AI models: Reinforcement Learning (RL), Imitation Learning (IL)
 - Policy families: PPO, AMP, and related actor-critic variants
 
-### What This Folder Is Used For
+<h3 style="display: flex; align-items: center; gap: 0.75em; margin-top: 1.5em; line-height: 1.5;">Function <span style="display: block; flex: 1; height: 1px; background: #6b7280; opacity: 0.9;"></span></h3>
+
+<a id="web-controller"></a>
+<details style="margin-left: 1.85em;">
+<summary><strong>Web Controller</strong></summary>
+
+<div style="margin-left: 1.85em; padding-top: 0.75em;">
+<p align="center">
+  <img src="g1_isaac/assets/img/g1-web-controller.png" alt="Web Controller"/>
+</p>
+
+A web-based controller for operating the simulated Unitree G1 in a browser. 
+- [English docs](g1_isaac/docs/web-controller.en.md)
+- [한글 문서](g1_isaac/docs/web-controller.md)
+</div>
+
+</details>
+
+
+<h3 style="display: flex; align-items: center; gap: 0.75em; margin-top: 1.5em; line-height: 1.5;">What This Folder Is Used For <span style="display: block; flex: 1; height: 1px; background: #6b7280; opacity: 0.9;"></span></h3>
 
 - Building physics-based simulation environments for the G1 robot
 - Training motion-tracking and motion-imitation policies from retargeted motion data
 - Running policy playback and sanity checks in simulation
 - Managing experiment logs, checkpoints, and reproducible training configs
 
-### Main Training Pipelines
+<h3 style="display: flex; align-items: center; gap: 0.75em; margin-top: 1.5em; line-height: 1.5;">Main Training Pipelines <span style="display: block; flex: 1; height: 1px; background: #6b7280; opacity: 0.9;"></span></h3>
 
 - AMP imitation pipeline:
 	Uses adversarial motion priors to learn style-consistent movements from reference motion clips.
@@ -38,7 +60,7 @@ policies for the Unitree G1 humanoid robot.
 	Uses handcrafted tracking rewards (DeepMimic-style) to follow retargeted trajectories.
 	This is provided by the ASAP-style implementation in `g1_isaac/scripts/asap/`.
 
-### Key Folder Highlights
+<h3 style="display: flex; align-items: center; gap: 0.75em; margin-top: 1.5em; line-height: 1.5;">Key Folder Highlights <span style="display: block; flex: 1; height: 1px; background: #6b7280; opacity: 0.9;"></span></h3>
 
 - `g1_isaac/source/g1_isaac/`:
 	Python extension source code (environments, task registration, configs).
@@ -51,7 +73,7 @@ policies for the Unitree G1 humanoid robot.
 - `g1_isaac/docs/`:
 	Task-specific notes and algorithm details.
 
-### Typical Workflow
+<h3 style="display: flex; align-items: center; gap: 0.75em; margin-top: 1.5em; line-height: 1.5;">Typical Workflow <span style="display: block; flex: 1; height: 1px; background: #6b7280; opacity: 0.9;"></span></h3>
 
 1. Register/list available tasks.
 2. Train a policy (AMP or PPO-based pipeline).

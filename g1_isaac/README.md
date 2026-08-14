@@ -12,19 +12,6 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
 
 **Keywords:** extension, template, isaaclab
 
-## 기능 업데이트
-
-- [Web Controller](#web-controller)
-
-<a id="web-controller"></a>
-<details>
-<summary><strong>Web Controller</strong></summary>
-
-![Web Controller](assets/img/g1-web-controller.png)
-
-브라우저에서 시뮬레이션 상의 Unitree G1을 조작하는 웹 기반 컨트롤러. 상세 내용은 [docs/web-controller.md](docs/web-controller.md) (또는 [English](docs/web-controller.en.md)) 참고.
-
-</details>
 
 ## Installation
 

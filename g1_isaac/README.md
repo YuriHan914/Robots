@@ -12,6 +12,20 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
 
 **Keywords:** extension, template, isaaclab
 
+## 기능 업데이트
+
+- [Web Controller](#web-controller)
+
+<a id="web-controller"></a>
+<details>
+<summary><strong>Web Controller</strong></summary>
+
+![Web Controller](assets/img/g1-web-controller.png)
+
+브라우저에서 시뮬레이션 상의 Unitree G1을 조작하는 웹 기반 컨트롤러. 상세 내용은 [docs/web-controller.md](docs/web-controller.md) (또는 [English](docs/web-controller.en.md)) 참고.
+
+</details>
+
 ## Installation
 
 - Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
@@ -299,6 +313,17 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
 
         The 7 skipped links have no visual mesh (an IMU sensor mount and the feet's 3-point contact
         sub-links), so there is nothing to derive a collider from - this is expected.
+
+
+## Task
+
+- Standing
+```
+python scripts/skrl/train.py --algorithm PPO --task G1-PPO-Direct-Stand-v0 --num_envs 4096 --headless
+
+python scripts/skrl/train.py --algorithm PPO --task G1-PPO-Direct-Stand-v0 --num_envs 1 --checkpoint /mnt/data/github/Robots/g1_isaac/logs/skrl/g1_stand/2026-08-10_10-23-38_ppo_torch/checkpoints/best_agent.pt
+
+```
 
 ### Set up IDE (Optional)
 

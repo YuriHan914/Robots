@@ -43,7 +43,46 @@ python controller/unitree_g1_web_controller_complete.py
 중계만 한다 - 토픽 목록은 `g1_isaac_sim_bridge.py`의 모듈 docstring 참고. 두 프로세스는
 같은 DDS 도메인 id(`--dds_domain_id`, 기본값 0)로 실행해야 서로를 찾는다.
 
-### Terminal 3 (또는 브라우저): 접속
+### Terminal 3 + 4 (선택): 머리 lidar → SLAM 지도 (LOCATION MAP에 실제 지도 표시)
+
+Terminal 1이 `--no_lidar` 없이 실행 중이면 머리에 360도 lidar가 달리고 로봇 주위에
+벽+장애물이 있는 방이 스폰된다(`_spawn_room`/`_attach_head_lidar` 참고). 이 lidar
+데이터를 실제 SLAM 지도로 바꾸려면 ROS 2(Jazzy)가 필요한데, `rclpy`는 Isaac Lab이 깔린
+`isaac` conda 환경(Python 3.11)과는 안 맞고(이유는 `g1_dds_types.py` 모듈 docstring
+참고) **Python 3.12로 맞춘 별도 conda 환경**이 필요하다 - 이것도 conda 환경이라 지금
+`isaac`처럼 `conda activate`만 하면 되고, 새로 필요한 시스템 패키지는 `slam_toolbox`
+하나뿐이다:
+
+```bash
+# 최초 1회
+sudo apt install ros-jazzy-slam-toolbox
+conda create -n ros2_slam python=3.12 -y
+conda activate ros2_slam
+pip install cyclonedds pillow pyyaml numpy
+conda deactivate
+```
+
+```bash
+# Terminal 3: raw DDS <-> ROS 2 변환 브리지
+source /opt/ros/jazzy/setup.bash
+conda activate ros2_slam
+export ROS_DOMAIN_ID=42   # --dds_domain_id(기본 0)와 겹치지 않는 값이면 아무거나
+python3 controller/ros2_slam_bridge.py
+```
+
+```bash
+# Terminal 4: slam_toolbox (같은 ros2_slam 환경)
+source /opt/ros/jazzy/setup.bash
+conda activate ros2_slam
+export ROS_DOMAIN_ID=42
+ros2 launch slam_toolbox online_async_launch.py \
+    slam_params_file:=controller/slam_toolbox_params.yaml use_sim_time:=false
+```
+
+로봇을 걷게 하면 LOCATION MAP의 배경이 실제 방 지도로 채워진다 - 지도는 새로 갱신될
+때만 업데이트되고(고정), 화살표만 계속 실시간으로 움직인다.
+
+### Terminal 5 (또는 브라우저): 접속
 
 **데스크톱:**
 ```
@@ -69,7 +108,9 @@ hostname -I
 레이더 화면을 클릭(또는 터치)하면 그 지점이 목표 지점(X/Y)으로 설정되고 빨간 십자
 마커가 표시된다 - BASIC ACTIONS 패널의 X/Y 입력창에 직접 숫자를 입력해도 동일하게
 동작한다. 실제 이동은 아래 **Walk**/**Run** 버튼을 눌러야 시작된다. 로봇의 현재
-위치/방향(HDG)은 시안색 화살표로 실시간 표시된다.
+위치/방향(HDG)은 시안색 화살표로 실시간 표시된다. Terminal 3+4(위 SLAM 섹션)까지
+띄웠다면 배경에 실제 SLAM 지도(벽/장애물)가 표시되고, 로봇이 새 구역을 탐색할 때만
+갱신된다 - 지도 자체는 고정이고 화살표만 움직인다.
 
 ### CAM FEED
 로봇 헤드에 마운트된 카메라의 실시간 영상. `--no_camera`로 실행했거나 시뮬레이터가

@@ -51,6 +51,7 @@ from g1_dds_types import (
     TOPIC_GOTO_COMMAND,
     TOPIC_HOME_POSITION,
     TOPIC_JOINT_STATES,
+    TOPIC_OCCUPANCY_MAP,
     TOPIC_POLICY_COMMAND,
     TOPIC_RESET_SIM,
     TOPIC_ROBOT_POSE,
@@ -59,6 +60,7 @@ from g1_dds_types import (
     CmdVel,
     GotoCommand,
     JointState,
+    OccupancyMap,
     PolicyCommand,
     RobotPose,
     Status,
@@ -139,6 +141,11 @@ class G1DdsBridge:
             Topic(self.participant, TOPIC_CAMERA_FRAME, CameraFrame),
             listener=dds_listener(self._on_camera_frame),
         )
+        self._occupancy_map_reader = DataReader(
+            self.participant,
+            Topic(self.participant, TOPIC_OCCUPANCY_MAP, OccupancyMap),
+            listener=dds_listener(self._on_occupancy_map),
+        )
 
         logger.info(f"✅ DDS(CycloneDDS) bridge ready on domain {domain_id}")
 
@@ -178,6 +185,21 @@ class G1DdsBridge:
         # forwarded as-is (still base64) - the browser renders it directly as a data: URL, no
         # re-encoding needed on this hop.
         socketio.emit("camera_frame", {"width": msg.width, "height": msg.height, "jpeg_base64": msg.jpeg_base64})
+
+    def _on_occupancy_map(self, msg: OccupancyMap) -> None:
+        # comes from ros2_slam_bridge.py (a separate, non-conda process - see that script's own
+        # docstring), forwarded as-is (still base64 PNG) the same way camera_frame is.
+        socketio.emit(
+            "occupancy_map",
+            {
+                "width": msg.width,
+                "height": msg.height,
+                "resolution": msg.resolution,
+                "origin_x": msg.origin_x,
+                "origin_y": msg.origin_y,
+                "png_base64": msg.png_base64,
+            },
+        )
 
 
 bridge: G1DdsBridge | None = None

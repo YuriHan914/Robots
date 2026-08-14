@@ -47,9 +47,7 @@ docker/artifacts/
 **/docs/_build/*
 **/generated/*
 **/error/*
-**/docs/*
 **/data/*
-**/assets/*
 
 # Isaac-Sim packman
 _isaac_sim*

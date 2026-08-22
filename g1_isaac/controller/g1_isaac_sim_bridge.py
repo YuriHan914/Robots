@@ -178,6 +178,7 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import base64
+import builtins
 import io
 import json
 import math
@@ -650,6 +651,27 @@ def _agent_act(agent, obs_tensor: torch.Tensor):
 # is what makes DirectRLEnv.step()'s own decimation loop start actually calling sim.render() each
 # step - no changes needed there.
 # ---------------------------------------------------------------------------
+def _raise_if_sensor_init_failed(sensor_name: str) -> None:
+    """Surface a manually-triggered ``_initialize_callback(None)`` failure immediately.
+
+    ``SensorBase._initialize_callback`` (isaaclab.sensors.sensor_base) catches *any* exception
+    raised inside ``_initialize_impl()``, stashes it in ``builtins.ISAACLAB_CALLBACK_EXCEPTION``,
+    and still marks the sensor ``_is_initialized = True`` regardless - this is normally fine since
+    the callback runs off the timeline's PLAY event and a later ``RuntimeError`` there shouldn't
+    crash the whole app. But ``_attach_head_camera``/``_attach_head_lidar`` invoke that same
+    callback directly, well after PLAY already fired, specifically to init a sensor added post-hoc
+    - here the swallowed exception means the sensor is left half-initialized (e.g. a RayCaster
+    with no ``self.drift``/rays set up), and the only symptom is a confusing, unrelated-looking
+    crash on the *next* ``env.reset()`` (``AttributeError: ... has no attribute 'drift'``) instead
+    of the real error at the point it actually happened. Re-raise here so the real cause (e.g. a
+    mount prim that isn't a rigid body / not Xformable) surfaces right away with a clear traceback.
+    """
+    exc = getattr(builtins, "ISAACLAB_CALLBACK_EXCEPTION", None)
+    if exc is not None:
+        builtins.ISAACLAB_CALLBACK_EXCEPTION = None
+        raise RuntimeError(f"{sensor_name} sensor failed to initialize (see chained exception below)") from exc
+
+
 def _find_camera_mount_body(body_names: list[str]) -> str:
     """Pick a body to mount the camera on: prefer a head-ish link, then torso/pelvis, else whatever
     the first body is. Exact link names vary by G1 USD build, hence the defensive fallback chain
@@ -710,6 +732,7 @@ def _attach_head_camera(robot, scene, width: int, height: int) -> Camera:
     # read). Firing the same callback manually is the only way to initialize a sensor added after
     # the sim is already playing.
     camera._initialize_callback(None)
+    _raise_if_sensor_init_failed("head_cam")
     # scene.update(dt) (called every physics substep inside env.step()'s decimation loop) is what
     # actually calls camera.update(dt) to mark its buffers dirty/refresh them - it only iterates
     # scene.sensors, so a camera that's never registered there gets its "outdated" flag consumed
@@ -875,8 +898,21 @@ def _attach_head_lidar(robot, scene) -> MultiMeshRayCaster:
         parent_path = base_path
         mount_desc = mount_body
 
+    # Attach the ray-caster to a freshly-spawned Xform child rather than `parent_path` directly.
+    # `parent_path` is a live, physics-driven robot link - once the sim is playing, IsaacLab's
+    # RayCaster._obtain_trackable_prim_view() ends up handing that (existing) prim to XFormPrimView,
+    # which validates it via `prim.IsA(UsdGeom.Xformable)` straight off the plain USD stage. Under
+    # the GPU/Fabric physics pipeline that query can come back empty (`GetTypeName() == ''`) for a
+    # prim actively owned by physics, even though it's a perfectly normal Xform - raising "Prim ...
+    # is not an xformable" and crashing the ray-caster's init. `_attach_head_camera` above never hits
+    # this because it always spawns its own fresh Camera prim under `parent_path` rather than
+    # tracking the link prim itself; mirror that here with a plain identity-offset Xform mount so the
+    # ray-caster tracks a prim that was never claimed by physics/Fabric.
+    mount_path = f"{parent_path}/lidar_mount"
+    sim_utils.create_prim(mount_path, "Xform", translation=(0.0, 0.0, 0.0))
+
     lidar_cfg = MultiMeshRayCasterCfg(
-        prim_path=parent_path,
+        prim_path=mount_path,
         mesh_prim_paths=["/World/ground", "/World/room/.*"],
         pattern_cfg=patterns.LidarPatternCfg(
             channels=1,
@@ -892,6 +928,7 @@ def _attach_head_lidar(robot, scene) -> MultiMeshRayCaster:
     # see _attach_head_camera's identical comment above: a sensor added after gym.make() already
     # started playback misses the PLAY-event callback that normally initializes it.
     lidar._initialize_callback(None)
+    _raise_if_sensor_init_failed("head_lidar")
     scene.sensors["head_lidar"] = lidar
     print(f"[g1_isaac_sim_bridge] Head lidar mounted on {mount_desc} (360 deg, {LIDAR_MAX_RANGE:.0f}m range)")
     return lidar

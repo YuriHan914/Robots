@@ -2,9 +2,20 @@
 
 *[한국어](README.ko.md)*
 
+---
+## 📽 Demo Video
+
 <p align="center">
-  <img src="g1_isaac/assets/img/g1_motion_example.png" width="520"/>
+  <a href="https://youtu.be/0aKPp4Y0CY8">
+    <img src="./g1_isaac/assets/img/g1-web-controller.png" width="700"/>
+  </a>
 </p>
+
+<p align="center">
+  <sub>Manufacturing Inspection Application (Click the image)</sub>
+</p>
+
+---
 
 This project extracts human motion data from videos and uses it for imitation learning of Unitree G1 control policies.
 For data generation, we used [GEM-X](https://github.com/NVlabs/GEM-X) and [SOMA-Retargeter](https://github.com/NVIDIA/soma-retargeter) to build motion datasets for imitation learning.

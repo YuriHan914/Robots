@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <sub>Manufacturing Inspection Application (Click the image)</sub>
+  <sub>Unitree G1 Robot (Click the image)</sub>
 </p>
 
 ---

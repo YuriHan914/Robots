@@ -19,8 +19,34 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_CFG as ROBOT_CFG
 from unitree_rl_lab.tasks.locomotion import mdp
+
+from g1_isaac.tasks.direct.g1_isaac.g1_isaac_env_stand_cfg import G1IsaacEnvCfg as G1StandEnvCfg
+
+# Same robot as G1-PPO-Direct-Stand-v0 (assets/g1_full_collision.usd + its actuators/init pose) instead of
+# unitree_rl_lab's UNITREE_G1_29DOF_CFG. This asset also has 5-finger hand joints and nests every link
+# under an extra "g1_full_collision/" prim (see G1StandEnvCfg's contact sensors).
+ROBOT_CFG = G1StandEnvCfg().robot_cfg
+ROBOT_LINK_PATH = "{ENV_REGEX_NS}/Robot/g1_full_collision"
+
+# The 29 body joints the policy drives, in unitree_rl_lab's articulation order (the order of
+# model/locomotion_deploy.yaml's joint_ids_map) so the policy stays 29-dim and fingers are left out.
+POLICY_JOINT_NAMES = [
+    "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint",
+    "left_hip_roll_joint", "right_hip_roll_joint", "waist_roll_joint",
+    "left_hip_yaw_joint", "right_hip_yaw_joint", "waist_pitch_joint",
+    "left_knee_joint", "right_knee_joint",
+    "left_shoulder_pitch_joint", "right_shoulder_pitch_joint",
+    "left_ankle_pitch_joint", "right_ankle_pitch_joint",
+    "left_shoulder_roll_joint", "right_shoulder_roll_joint",
+    "left_ankle_roll_joint", "right_ankle_roll_joint",
+    "left_shoulder_yaw_joint", "right_shoulder_yaw_joint",
+    "left_elbow_joint", "right_elbow_joint",
+    "left_wrist_roll_joint", "right_wrist_roll_joint",
+    "left_wrist_pitch_joint", "right_wrist_pitch_joint",
+    "left_wrist_yaw_joint", "right_wrist_yaw_joint",
+]  # fmt: skip
+POLICY_JOINTS = SceneEntityCfg("robot", joint_names=POLICY_JOINT_NAMES, preserve_order=True)
 
 COBBLESTONE_ROAD_CFG = terrain_gen.TerrainGeneratorCfg(
     size=(8.0, 8.0),
@@ -67,14 +93,14 @@ class RobotSceneCfg(InteractiveSceneCfg):
 
     # sensors
     height_scanner = RayCasterCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
+        prim_path=f"{ROBOT_LINK_PATH}/torso_link",
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
         ray_alignment="yaw",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
-    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
+    contact_forces = ContactSensorCfg(prim_path=f"{ROBOT_LINK_PATH}/.*", history_length=3, track_air_time=True)
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -184,7 +210,7 @@ class ActionsCfg:
     """Action specifications for the MDP."""
 
     JointPositionAction = mdp.JointPositionActionCfg(
-        asset_name="robot", joint_names=[".*"], scale=0.25, use_default_offset=True
+        asset_name="robot", joint_names=POLICY_JOINT_NAMES, preserve_order=True, scale=0.25, use_default_offset=True
     )
 
 
@@ -200,8 +226,15 @@ class ObservationsCfg:
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2))
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
-        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
-        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, noise=Unoise(n_min=-1.5, n_max=1.5))
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos_rel, params={"asset_cfg": POLICY_JOINTS}, noise=Unoise(n_min=-0.01, n_max=0.01)
+        )
+        joint_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            params={"asset_cfg": POLICY_JOINTS},
+            scale=0.05,
+            noise=Unoise(n_min=-1.5, n_max=1.5),
+        )
         last_action = ObsTerm(func=mdp.last_action)
         gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.8})
 
@@ -221,8 +254,8 @@ class ObservationsCfg:
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2)
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
-        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
-        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
+        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, params={"asset_cfg": POLICY_JOINTS})
+        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, params={"asset_cfg": POLICY_JOINTS}, scale=0.05)
         last_action = ObsTerm(func=mdp.last_action)
         # gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.8})
         # height_scanner = ObsTerm(func=mdp.height_scan,
@@ -257,12 +290,12 @@ class RewardsCfg:
     # -- base
     base_linear_velocity = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     base_angular_velocity = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
-    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.001)
-    joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.001, params={"asset_cfg": POLICY_JOINTS})
+    joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7, params={"asset_cfg": POLICY_JOINTS})
     # Hotfix: slightly stronger smoothing to reduce jitter/saturation on hardware
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.08)
-    dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-5.0)
-    energy = RewTerm(func=mdp.energy, weight=-2e-5)
+    dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-5.0, params={"asset_cfg": POLICY_JOINTS})
+    energy = RewTerm(func=mdp.energy, weight=-2e-5, params={"asset_cfg": POLICY_JOINTS})
 
     joint_deviation_arms = RewTerm(
         func=mdp.joint_deviation_l1,
@@ -388,7 +421,12 @@ class RobotEnvCfgFinetune(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
-        self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+        # same PhysX GPU buffers as G1StandEnvCfg.sim - g1_full_collision.usd's full-body collision
+        # overflows the defaults
+        self.sim.physx.gpu_collision_stack_size = 2**28
+        self.sim.physx.gpu_found_lost_pairs_capacity = 2**23
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 2**23
+        self.sim.physx.gpu_max_rigid_patch_count = 2**19
 
         # update sensor update periods
         # we tick all the sensors based on the smallest update period (physics update period)

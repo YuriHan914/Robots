@@ -8,7 +8,7 @@ A browser-based web controller (under `controller/`) for driving the simulated U
 
 | File | Role |
 |---|---|
-| `g1_isaac_sim_bridge.py` | The Isaac Sim process. Owns G1 loading, the physics loop, walking control (CPG), skrl/PPO policy inference, and head camera/lidar streaming. Run directly in the `isaac` conda environment. |
+| `g1_isaac_sim_bridge.py` | The Isaac Sim process. Owns G1 loading, the physics loop, walking control (unitree_rl_lab locomotion policy), skrl/PPO policy inference, and head camera/lidar streaming. Run directly in the `isaac` conda environment. |
 | `unitree_g1_web_controller_complete.py` | The web server. Flask + Flask-SocketIO receives HTTP/WebSocket traffic and relays it over raw DDS (Eclipse CycloneDDS) - no physics/inference logic of its own. |
 | `g1_web_ui_mobile_first.html` | The web UI itself (LOCATION MAP, CAM FEED, joysticks, action buttons). |
 | `g1_dds_types.py` | DDS message types/topic names shared between the web server and the Isaac Sim process. |
@@ -25,7 +25,7 @@ Browser (desktop/mobile)
 unitree_g1_web_controller_complete.py  (Flask + Flask-SocketIO, thin relay)
     | raw DDS (g1/cmd_vel, g1/goto_command, g1/policy_command, ...)
 g1_isaac_sim_bridge.py  (Isaac Sim process)
-    +- CPG walking controller (manual/goto)
+    +- locomotion policy (manual joystick / goto target point)
     +- PPO Stand policy / skrl AMP dance policy inference
     +- head camera (RGB) streaming
     +- head lidar scan -> ros2_slam_bridge.py -> slam_toolbox -> g1.OccupancyMap
@@ -48,16 +48,17 @@ Two separate communication layers meet inside a single process, `ros2_slam_bridg
 
 | Direction | Topic | DDS type | Fields |
 |---|---|---|---|
-| Web -> Sim | `g1/cmd_vel` | `g1.CmdVel` | `linear_x`, `linear_y` (unused), `angular_z` |
-| Web -> Sim | `g1/goto_command` | `g1.GotoCommand` | `x`, `y` (m), `gait` (`"walk"`\|`"run"`) |
+| Web -> Sim | `g1/cmd_vel` | `g1.CmdVel` | `linear_x`, `linear_y` (strafe), `angular_z` |
+| Web -> Sim | `g1/goto_command` | `g1.GotoCommand` | `x`, `y` (m), `gait` (`"walk"`\|`"run"`), `speed` (m/s, 0 = gait default) |
 | Web -> Sim | `g1/goto_cancel` | `g1.Trigger` | `stamp` |
 | Web -> Sim | `g1/policy_command` | `g1.PolicyCommand` | `command` (`"play"`\|`"stop"`) |
 | Web -> Sim | `g1/home_position` | `g1.Trigger` | `stamp` |
 | Web -> Sim | `g1/reset_sim` | `g1.Trigger` | `stamp` |
 | Web -> Sim | `g1/emergency_stop` | `g1.Trigger` | `stamp` |
+| Web -> Sim | `g1/stand_command` | `g1.Trigger` | `stamp` |
 | Sim -> Web | `g1/robot_pose` | `g1.RobotPose` | `x,y,z`, `qw,qx,qy,qz` |
 | Sim -> Web | `g1/joint_states` | `g1.JointState` | `name[]`, `position[]`, `velocity[]` |
-| Sim -> Web | `g1/status` | `g1.Status` | `payload_json` (`{"mode","gait","target","distance_to_target","policy_loaded"}`) |
+| Sim -> Web | `g1/status` | `g1.Status` | `payload_json` (`{"mode","gait","target","distance_to_target","policy_loaded","stand_policy","loco","goto_speed","camera_error"}`) |
 | Sim -> Web | `g1/camera_frame` | `g1.CameraFrame` | `width`, `height`, `jpeg_base64` |
 | Sim -> Web | `g1/lidar_scan` | `g1.LidarScan` | `angle_min/max`, `angle_increment`, `range_min/max`, `ranges[]` (field layout deliberately mirrors ROS 2's `sensor_msgs/LaserScan` 1:1) |
 | Sim (via ros2_slam_bridge) -> Web | `g1/occupancy_map` | `g1.OccupancyMap` | `width`, `height`, `resolution`, `origin_x/y`, `png_base64` (PNG+base64, same wire pattern as `g1.CameraFrame`) |
@@ -117,3 +118,32 @@ Designed to reproduce the same "single-plane 360-degree" scan pattern as real sp
 - Wired up a PPO-based **Stand** policy for live inference: a `G1-PPO-Direct-Stand-v0` checkpoint (`--stand_policy_checkpoint`, defaulting to `logs/skrl/g1_stand/2026-08-13_02-36-26_ppo_torch/checkpoints/best_agent.pt`) is run every step against this script's own env/robot by `_StandPolicyController` - it starts automatically on load, and can also be triggered from the web UI via `policy_command` (`g1/policy_command` = `"play"`).
 - Applied the trained Stand policy's joint pose/gain snapshot (`_TRAINED_STAND_POSE`/`_TRAINED_STAND_GAIN`, `_apply_trained_stand_defaults`) to the robot at startup, so `stand` mode and every `env.reset()` hold this trained pose.
 - Wired the **Reset / Home** buttons to an explicit `env.reset()` trigger (`g1/home_position`, `g1/reset_sim` DDS topics) - the environment's own automatic reset-on-fall is disabled (`early_termination=False`), so a fallen robot can only recover via these buttons. `g1/emergency_stop` drops to `stand` immediately, without resetting.
+
+### 2026-10-23 - Joystick and go-to-point (x, y) now run a locomotion policy
+
+- Joystick (`manual`) and go-to-point (`goto`) driving both run a **velocity-tracking locomotion policy** trained in unitree_rl_lab (rsl_rl `exported/policy.pt` + `params/deploy.yaml`) (`_LocomotionPolicyController`, `g1_isaac_sim_bridge.py`). The old CPG walking controller is gone.
+  - `--loco_policy` (the TorchScript policy) and `--loco_deploy_cfg` (deploy.yaml from the same run) are required. They default to `model/locomotion_policy.pt` and `model/locomotion_deploy.yaml` (copies of `exported/policy.pt` and `params/deploy.yaml` from unitree_g1_rl_lab's `logs/rsl_rl/finetune_yaw/2026-10-22_18-14-44`), and an empty value exits with an error before Isaac Sim boots.
+  - The policy was trained on a different env (unitree_rl_lab's ManagerBasedRLEnv), so this script rebuilds its observation and action from deploy.yaml. Observation terms are scaled and history-stacked in deploy.yaml's order. The action `target = offset + scale * action` is converted into the AMP env's 29-dim action. The policy runs at 50 Hz (`step_dt` 0.02 s), and its target is held in between.
+  - While the policy drives the robot, legs/feet/waist/arms gains and armature are switched to deploy.yaml's trained values. They are restored when it exits.
+- **Entry transition**: switching from a standing pose straight into the walking policy topples the robot, so entry is staged.
+  1. `interp` (`--loco_transition_time`, default 0.3 s): the policy already runs at zero velocity while the joint target and PD gains blend (smoothstep) from the last command to the policy's output. Verified in sim: 0.3 s drifts least, 0.6-1.0 s holds but drifts ~0.5 m, and 2.0 s falls.
+  2. `warmup` (`--loco_warmup_time`, default 1.0 s): the policy alone at zero velocity. It advances only after tilt (|projected gravity xy| < 0.12) and speed (< 0.3 m/s) have stayed calm for 0.5 s.
+  3. `active`: the velocity command is applied.
+- **Joystick**
+  - `g1/cmd_vel` is normalized to [-1, 1] stick deflection (full scale `linear_x` 2.0, `linear_y` 1.0, `angular_z` 1.0, deadzone 0.05). It is then scaled into the policy's trained command range, using the full travel both ways even when the range is asymmetric. The current policy's range is vx -0.5 to 1.0 m/s, vy ±0.5 m/s, and wz ±0.5 rad/s.
+  - The command rate is limited (vx/vy 1.0 m/s², wz 1.5 rad/s²), so slamming the stick produces a ramp.
+  - `linear_y` (strafing) is now used.
+  - Releasing the stick keeps `manual` mode, with the policy stepping in place at zero velocity.
+- **Go-to-point (Walk/Run)** (`_goto_velocity_command`, `drive_loco_to_target`)
+  - The heading error to the target sets the yaw rate (gain 1.5, capped at the policy's trained range).
+  - Forward speed fades as the heading error grows and is zero past 60°, so the robot turns in place first.
+  - A distance-based speed cap (0.8 × distance) eases the robot into the target. Within 0.2 m it counts as arrived and hands over to `manual` at zero velocity (stepping in place).
+  - Speed is 0.5 m/s for Walk by default and 1.4 m/s for Run. The web UI's target input gained a **V (m/s)** field: Walk uses the entered value (clamped to 0.1-1.4, blank = default), and Run always uses 1.4 m/s. `g1.GotoCommand` gained a matching `speed` field (0 = gait default).
+  - Speed builds up at 0.3 m/s², and braking uses the joystick's rate.
+  - Run's 1.4 m/s is a command value past the policy's trained 1.0 m/s cap; the robot tracks ~1.02 m/s actual. In sim, 1.0-1.4 never fell, and 1.6 fell 1 of 2 times.
+- **Stand button**: new `g1/stand_command` topic and a matching `stand` event on the web server.
+  - While walking, the robot isn't cut off mid-stride. The command ramps to zero, and once speed stays under 0.15 m/s for 0.5 s (or 4 s after the command reached zero), the robot is handed to the Stand PPO policy. The hand-over blends over `--loco_handover_time` (default 0.5 s). In sim, a direct switch tilted ~30°, and 1.0 s or longer fell.
+  - Cancelling a goto (`g1/goto_cancel`) takes the same path.
+  - Without `--stand_policy_checkpoint` there is no policy to hand over to, so the walking policy at zero velocity serves as standing.
+- `g1/status` gained `stand_policy`, `loco` (`phase`, plus `cmd`, the velocity command the policy is actually following), `goto_speed` and `camera_error`. The web UI uses them to show `Standing` / `Stopping` / `Walking in place`.
+- Model weights now live in `g1_isaac/model/`. The Stand policy (`--stand_policy_checkpoint`) default moved from `logs/skrl/g1_stand/2026-08-13_02-36-26_ppo_torch/checkpoints/best_agent.pt` to its copy `model/stand_policy.pt`, and the walking policy reads its files from `model/` as above (the old `--loco_policy_dir` is gone).

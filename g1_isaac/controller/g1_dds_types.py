@@ -70,8 +70,8 @@ def dds_listener(handler):
 
 @dataclass
 class CmdVel(IdlStruct, typename="g1.CmdVel"):
-    """Manual joystick command. ``linear_y`` is accepted for forward-compat but ignored by the
-    sim bridge's gait generator (no dedicated strafing gait, see ``CpgGait``)."""
+    """Manual joystick command. ``linear_y`` (strafing) is used by the sim bridge's locomotion policy
+    (``_LocomotionPolicyController``)."""
 
     linear_x: float = 0.0
     linear_y: float = 0.0
@@ -85,6 +85,7 @@ class GotoCommand(IdlStruct, typename="g1.GotoCommand"):
     x: float = 0.0
     y: float = 0.0
     gait: str = "walk"
+    speed: float = 0.0  # m/s; 0 = the gait's own default (see the sim bridge's _GOTO_WALK_SPEED/_GOTO_RUN_SPEED)
 
 
 @dataclass
@@ -179,6 +180,7 @@ TOPIC_POLICY_COMMAND = "g1/policy_command"
 TOPIC_HOME_POSITION = "g1/home_position"
 TOPIC_RESET_SIM = "g1/reset_sim"
 TOPIC_EMERGENCY_STOP = "g1/emergency_stop"
+TOPIC_STAND_COMMAND = "g1/stand_command"
 TOPIC_ROBOT_POSE = "g1/robot_pose"
 TOPIC_JOINT_STATES = "g1/joint_states"
 TOPIC_STATUS = "g1/status"

@@ -55,6 +55,7 @@ from g1_dds_types import (
     TOPIC_POLICY_COMMAND,
     TOPIC_RESET_SIM,
     TOPIC_ROBOT_POSE,
+    TOPIC_STAND_COMMAND,
     TOPIC_STATUS,
     CameraFrame,
     CmdVel,
@@ -124,6 +125,7 @@ class G1DdsBridge:
         self.home_writer = DataWriter(self.participant, Topic(self.participant, TOPIC_HOME_POSITION, Trigger))
         self.reset_writer = DataWriter(self.participant, Topic(self.participant, TOPIC_RESET_SIM, Trigger))
         self.estop_writer = DataWriter(self.participant, Topic(self.participant, TOPIC_EMERGENCY_STOP, Trigger))
+        self.stand_writer = DataWriter(self.participant, Topic(self.participant, TOPIC_STAND_COMMAND, Trigger))
 
         self._pose_reader = DataReader(
             self.participant, Topic(self.participant, TOPIC_ROBOT_POSE, RobotPose), listener=dds_listener(self._on_pose)
@@ -262,11 +264,16 @@ def handle_cmd_vel(data):
 
 @socketio.on("goto_target")
 def handle_goto_target(data):
-    """목표 지점 (x, y)으로 걷기/뛰기 모드 시작."""
+    """목표 지점 (x, y)으로 걷기/뛰기 모드 시작. speed(m/s)가 0/없으면 gait 기본 속도."""
     if bridge is None:
         return
     bridge.goto_writer.write(
-        GotoCommand(x=float(data.get("x", 0.0)), y=float(data.get("y", 0.0)), gait=data.get("gait", "walk"))
+        GotoCommand(
+            x=float(data.get("x", 0.0)),
+            y=float(data.get("y", 0.0)),
+            gait=data.get("gait", "walk"),
+            speed=float(data.get("speed") or 0.0),
+        )
     )
 
 
@@ -309,6 +316,13 @@ def handle_reset_sim(_data=None):
     logger.info("reset_sim: publishing g1/reset_sim")
     bridge.reset_writer.write(Trigger(stamp=time.time()))
     emit("response", {"status": "reset"})
+
+
+@socketio.on("stand")
+def handle_stand(_data=None):
+    """'Stand' 버튼: 서 있는 상태로 복귀 (걷기 정책 중이면 sim 쪽에서 멈춘 뒤 부드럽게 전환)."""
+    if bridge is not None:
+        bridge.stand_writer.write(Trigger(stamp=time.time()))
 
 
 @socketio.on("emergency_stop")

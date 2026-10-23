@@ -120,15 +120,20 @@
         .left-col {
             /* grow 1.35 (share leftover space), shrink 0 (never squeeze narrower than the basis -
                forces a clean wrap to a new row instead), basis 480px (preferred width) */
-            flex: 1.35 0 480px;
+            flex: 1.35 0 752px;
             min-width: 280px;
             min-height: 0;
             display: flex;
-            flex-direction: column;
+            /* map and cam sit side by side when both 720px panels fit, else stack (wrap) */
+            flex-direction: row;
+            flex-wrap: wrap;
             /* centers the now fixed-size map/cam panels within any leftover space instead of
-               stretching them to fill it - enlarging the window just adds margin around them */
-            justify-content: center;
-            align-items: center;
+               stretching them to fill it - enlarging the window just adds margin around them.
+               'safe': once the column overflows, align to the start instead, so its top stays
+               reachable by scrolling */
+            justify-content: safe center;
+            align-content: safe center;
+            align-items: flex-start;
             gap: clamp(8px, 2.5vw, 14px);
             padding: clamp(8px, 3vw, 16px);
             overflow-y: auto;
@@ -146,9 +151,9 @@
            max-width and derives its height from aspect-ratio, so it stops growing once it hits that
            cap; .left-col's centering (above) absorbs any extra room as margin instead. */
         .map-panel, .cam-panel {
-            flex: none;
+            flex: 1 1 520px;
             width: 100%;
-            max-width: 480px;
+            max-width: 720px;
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -195,7 +200,7 @@
             /* was flex:1 (stretched to whatever height .map-panel became); now derives its own
                height from its width via aspect-ratio, matching .map-panel's fixed-size behavior */
             flex: none;
-            aspect-ratio: 1 / 1;
+            aspect-ratio: 4 / 3;
             position: relative;
             background: var(--bg-well);
             display: flex;
@@ -206,11 +211,13 @@
 
         .radar {
             position: relative;
-            width: 100%;
             height: 100%;
-            max-width: 280px;
-            max-height: 280px;
+            max-width: 420px;
+            max-height: 420px;
             aspect-ratio: 1;
+            /* zoomed/panned map content (SLAM image, robot, target) is clipped to the map square */
+            overflow: hidden;
+            border-radius: 8px;
         }
 
         /* SLAM occupancy-grid map (see applyOccupancyMap()): anchored at the radar's center like
@@ -232,11 +239,12 @@
 
         .radar-ring { position: absolute; border-radius: 50%; border: 1px solid var(--border); }
         .radar-ring.r1 { inset: 0; }
-        .radar-ring.r2 { inset: 38px; }
-        .radar-ring.r3 { inset: 76px; }
+        .radar-ring.r2 { inset: 13.6%; }
+        .radar-ring.r3 { inset: 27.1%; }
 
-        .radar-axis-h { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: rgba(255,255,255,0.06); }
-        .radar-axis-v { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: rgba(255,255,255,0.06); }
+        /* world x/y axes through the origin - moved with the view by renderMapView() */
+        .radar-axis-h { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: rgba(255,255,255,0.12); }
+        .radar-axis-v { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: rgba(255,255,255,0.12); }
 
         .radar-dot {
             position: absolute;
@@ -257,6 +265,21 @@
         }
 
         .radar { cursor: crosshair; touch-action: none; }
+        .radar.panning { cursor: grabbing; }
+
+        .map-header-right { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
+        .map-reset-btn {
+            flex: none;
+            background: var(--bg-well);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            border-radius: 6px;
+            padding: 3px 8px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .map-reset-btn:hover { color: var(--text); }
 
         .radar-target {
             position: absolute;
@@ -295,8 +318,8 @@
             position: relative;
             width: 100%;
             height: 100%;
-            max-width: 480px;
-            max-height: 360px;
+            max-width: 720px;
+            max-height: 540px;
             overflow: hidden;
             background: repeating-linear-gradient(135deg, var(--bg-well) 0px, var(--bg-well) 18px, oklch(14% 0.012 240) 18px, oklch(14% 0.012 240) 36px);
             display: flex;
@@ -326,6 +349,16 @@
             font-size: 12px;
             color: rgba(255, 255, 255, 0.35);
             letter-spacing: 0.5px;
+            max-width: 90%;
+            text-align: center;
+            overflow-wrap: anywhere;
+        }
+
+        .cam-placeholder-detail {
+            display: block;
+            margin-top: 6px;
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.25);
         }
 
         .cam-status-dot {
@@ -580,10 +613,10 @@
            happens at, which is what makes it robust to embedding contexts (e.g. an app webview)
            where this max-width query's threshold might not line up exactly with where wrapping is
            actually needed. */
-        @media (max-width: 940px) {
+        @media (max-width: 1180px) {
             /* .left-col previously kept flex-shrink:0 (correct for the desktop wrap-vs-squeeze
                decision above) even after wrapping onto its own row here, so it refused to shrink
-               narrower than its 480px basis - overflowing/clipping on any phone narrower than that,
+               narrower than its basis - overflowing/clipping on any phone narrower than that,
                which is exactly why the map/cam column wasn't adapting to mobile width the way the
                sidebar already did below. */
             .left-col { flex: 1 1 100%; min-width: 0; max-width: 100%; }
@@ -610,16 +643,20 @@
             <div class="panel map-panel">
                 <div class="panel-header">
                     <div class="panel-title">LOCATION MAP</div>
-                    <div class="panel-meta" id="mapReadout">X 0.0m &nbsp;Y 0.0m &nbsp;HDG 0&deg;</div>
+                    <div class="map-header-right">
+                        <div class="panel-meta" id="mapReadout">X 0.0m &nbsp;Y 0.0m &nbsp;HDG 0&deg;</div>
+                        <div class="panel-meta" id="mapZoomReadout">1.0x</div>
+                        <button class="map-reset-btn" id="mapResetBtn" title="Reset zoom/pan">RESET</button>
+                    </div>
                 </div>
                 <div class="radar-wrap">
-                    <div class="radar" id="radar" title="Click to set target (x, y)">
+                    <div class="radar" id="radar" title="Click: set target (x, y) &middot; Wheel: zoom &middot; Drag (left or wheel button): pan">
                         <img class="radar-map-img" id="radarMapImg" alt="">
                         <div class="radar-ring r1"></div>
                         <div class="radar-ring r2"></div>
                         <div class="radar-ring r3"></div>
-                        <div class="radar-axis-h"></div>
-                        <div class="radar-axis-v"></div>
+                        <div class="radar-axis-h" id="radarAxisH"></div>
+                        <div class="radar-axis-v" id="radarAxisV"></div>
                         <div class="radar-target" id="radarTarget">
                             <div class="radar-target-ring"></div>
                             <div class="radar-target-h"></div>
@@ -632,7 +669,7 @@
                 </div>
             </div>
 
-            <!-- cam feed (no real camera wired up - decorative placeholder only) -->
+            <!-- cam feed (live JPEG frames from the sim's head camera, g1/camera_frame) -->
             <div class="panel cam-panel">
                 <div class="panel-header">
                     <div class="panel-title">CAM FEED</div>
@@ -696,6 +733,8 @@
                 <div class="target-coords">
                     <label>X (m)<input type="number" id="targetX" step="0.1" value="0.0"></label>
                     <label>Y (m)<input type="number" id="targetY" step="0.1" value="0.0"></label>
+                    <!-- empty = Walk's default 0.5 m/s; Run always uses the max safe speed (sim caps at 1.4) -->
+                    <label>V (m/s)<input type="number" id="targetSpeed" step="0.1" min="0.1" max="1.4" placeholder="0.5"></label>
                 </div>
                 <div class="actions-grid">
                     <button class="action-btn" id="btnStand" onclick="doStand()">Stand</button>
@@ -768,11 +807,15 @@
             }
             const mode = data.mode || 'stand';
             const gait = data.gait || 'stand';
-            dancePlaying = (mode === 'policy');
+            standPolicy = !!data.stand_policy;
+            locoPhase = data.loco ? data.loco.phase : null;
+            locoCmd = data.loco ? data.loco.cmd : null;
+            dancePlaying = (mode === 'policy') && !standPolicy;
             updateActionState(mode, gait);
             updateDanceMeta(!!data.policy_loaded);
             lastDistance = (data.distance_to_target === null || data.distance_to_target === undefined) ? null : data.distance_to_target;
             renderMapMeta();
+            showCameraError(data.camera_error);
         });
 
         socket.on('robot_pose', (pose) => {
@@ -787,6 +830,18 @@
         // head camera - the sim only publishes a frame if it actually mounted a camera
         // (g1_isaac_sim_bridge.py, skipped when run with --no_camera)
         let lastCamFrameTime = 0;
+
+        // the sim reports why it has no camera (--no_camera, or the sensor failed to start) in
+        // every status message - shown in place of the generic placeholder while no frames arrive
+        function showCameraError(error) {
+            if (!error || lastCamFrameTime !== 0) return;
+            const placeholder = document.getElementById('camPlaceholder');
+            placeholder.textContent = 'CAMERA UNAVAILABLE';
+            const detail = document.createElement('span');
+            detail.className = 'cam-placeholder-detail';
+            detail.textContent = error;
+            placeholder.appendChild(detail);
+        }
         socket.on('camera_frame', (data) => {
             lastCamFrameTime = Date.now();
             const img = document.getElementById('camImage');
@@ -832,27 +887,59 @@
         }
 
         // ==================== radar (location map + mini status radar) ====================
-        const RADAR_SCALE = 3.0;     // px per meter for the main radar's position mapping
-        const RADAR_CLAMP_PX = 118;  // matches the ~280px radar's visible radius minus margin
+        const RADAR_SCALE = 3.0;  // px per meter for the mini status radar (fixed, no zoom)
+
+        // main location map: a zoomable/pannable view onto world coordinates. At zoom 1 the map's
+        // half-width spans MAP_HALF_RANGE_M meters around the view center (cx, cy).
+        const MAP_HALF_RANGE_M = 10.0;
+        const MAP_ZOOM_MIN = 0.25;
+        const MAP_ZOOM_MAX = 20.0;
+        const MAP_DRAG_THRESHOLD_PX = 4;  // pointer travel that turns a click (set target) into a pan
+        const mapView = { zoom: 1.0, cx: 0.0, cy: 0.0 };
+        let lastOccupancyMap = null;  // re-laid out on every zoom/pan, not just when a new map arrives
 
         function clampVal(v, lim) { return Math.max(-lim, Math.min(lim, v)); }
+
+        function mapHalfWidthPx() {
+            return (document.getElementById('radar').clientWidth || 420) / 2;
+        }
+
+        function mapPxPerMeter() {
+            return mapHalfWidthPx() / MAP_HALF_RANGE_M * mapView.zoom;
+        }
+
+        // world (x, y) -> px offset from the map's center; +Y world = up on screen
+        function worldToMap(x, y) {
+            const s = mapPxPerMeter();
+            return [(x - mapView.cx) * s, -(y - mapView.cy) * s];
+        }
+
+        function mapToWorld(dx, dy) {
+            const s = mapPxPerMeter();
+            return [mapView.cx + dx / s, mapView.cy - dy / s];
+        }
 
         // world (origin_x, origin_y) is the map's cell-(0,0) corner (bottom-left, standard
         // nav_msgs/OccupancyGrid convention) - but the PNG ros2_slam_bridge.py sends is already
         // flipped vertically to image convention (row 0 = top), so the image's top-left corner is
-        // the map's *top*-left world corner: (origin_x, origin_y + height*resolution). Same
-        // RADAR_SCALE/sign convention as updateRadar()'s mainX/mainY (+Y world = up on screen).
+        // the map's *top*-left world corner: (origin_x, origin_y + height*resolution).
         function applyOccupancyMap(data) {
+            lastOccupancyMap = data;
             const img = document.getElementById('radarMapImg');
             img.src = `data:image/png;base64,${data.png_base64}`;
-            const widthPx = data.width * data.resolution * RADAR_SCALE;
-            const heightPx = data.height * data.resolution * RADAR_SCALE;
-            const topLeftX = data.origin_x * RADAR_SCALE;
-            const topLeftY = -(data.origin_y + data.height * data.resolution) * RADAR_SCALE;
-            img.style.width = `${widthPx}px`;
-            img.style.height = `${heightPx}px`;
-            img.style.transform = `translate(${topLeftX}px, ${topLeftY}px)`;
             img.classList.add('visible');
+            layoutOccupancyMap();
+        }
+
+        function layoutOccupancyMap() {
+            const data = lastOccupancyMap;
+            if (!data) return;
+            const img = document.getElementById('radarMapImg');
+            const s = mapPxPerMeter();
+            const [left, top] = worldToMap(data.origin_x, data.origin_y + data.height * data.resolution);
+            img.style.width = `${data.width * data.resolution * s}px`;
+            img.style.height = `${data.height * data.resolution * s}px`;
+            img.style.transform = `translate(${left}px, ${top}px)`;
         }
 
         function updateRadar() {
@@ -860,15 +947,48 @@
             // resting (0deg) orientation already points "up" (+Y) - so screen rotation = 90 - yaw.
             const arrowDeg = 90 - (robotPose.heading || 0);
 
-            const mainX = clampVal(robotPose.x * RADAR_SCALE, RADAR_CLAMP_PX);
-            const mainY = clampVal(-robotPose.y * RADAR_SCALE, RADAR_CLAMP_PX);
-            document.getElementById('radarDot').style.transform = `translate(${mainX}px, ${mainY}px)`;
+            // off-view robot stays pinned to the map's edge, pointing the right way
+            const lim = mapHalfWidthPx() - 8;
+            const [mx, my] = worldToMap(robotPose.x, robotPose.y);
+            document.getElementById('radarDot').style.transform = `translate(${clampVal(mx, lim)}px, ${clampVal(my, lim)}px)`;
             document.getElementById('radarArrow').style.transform = `rotate(${arrowDeg}deg)`;
 
             const miniX = clampVal(robotPose.x * RADAR_SCALE * 0.5, 40);
             const miniY = clampVal(-robotPose.y * RADAR_SCALE * 0.5, 40);
             document.getElementById('miniDot').style.transform = `translate(${miniX}px, ${miniY}px)`;
             document.getElementById('miniArrow').style.transform = `rotate(${arrowDeg}deg)`;
+        }
+
+        function renderMapView() {
+            const [ox, oy] = worldToMap(0, 0);
+            document.getElementById('radarAxisH').style.top = `calc(50% + ${oy}px)`;
+            document.getElementById('radarAxisV').style.left = `calc(50% + ${ox}px)`;
+            layoutOccupancyMap();
+            updateRadar();
+            updateTargetMarkerPosition();
+            const halfRange = MAP_HALF_RANGE_M / mapView.zoom;
+            document.getElementById('mapZoomReadout').textContent =
+                `${mapView.zoom.toFixed(1)}x ±${halfRange < 10 ? halfRange.toFixed(1) : Math.round(halfRange)}m`;
+        }
+
+        function panMap(dxPx, dyPx) {
+            const s = mapPxPerMeter();
+            mapView.cx -= dxPx / s;
+            mapView.cy += dyPx / s;
+            renderMapView();
+        }
+
+        // zoom by `factor` keeping the world point under (clientX, clientY) fixed on screen
+        function zoomMapAt(clientX, clientY, factor) {
+            const rect = document.getElementById('radar').getBoundingClientRect();
+            const dx = clientX - (rect.left + rect.width / 2);
+            const dy = clientY - (rect.top + rect.height / 2);
+            const [wx, wy] = mapToWorld(dx, dy);
+            mapView.zoom = Math.max(MAP_ZOOM_MIN, Math.min(MAP_ZOOM_MAX, mapView.zoom * factor));
+            const s = mapPxPerMeter();
+            mapView.cx = wx - dx / s;
+            mapView.cy = wy + dy / s;
+            renderMapView();
         }
 
         function renderMapMeta() {
@@ -884,8 +1004,7 @@
             const el = document.getElementById('radarTarget');
             if (!targetMarker) { el.classList.remove('visible'); return; }
             el.classList.add('visible');
-            const x = clampVal(targetMarker.x * RADAR_SCALE, RADAR_CLAMP_PX);
-            const y = clampVal(-targetMarker.y * RADAR_SCALE, RADAR_CLAMP_PX);
+            const [x, y] = worldToMap(targetMarker.x, targetMarker.y);
             el.style.transform = `translate(${x}px, ${y}px)`;
         }
 
@@ -898,38 +1017,83 @@
         }
 
         function setTargetFromRadarClick(clientX, clientY) {
-            const radarEl = document.getElementById('radar');
-            const rect = radarEl.getBoundingClientRect();
-            const cx = rect.left + rect.width / 2;
-            const cy = rect.top + rect.height / 2;
-            // scale the click radius the same way the radar's own max-width:280px reference does,
-            // so a click lands exactly where the dot/marker will actually be drawn at this size.
-            const maxRadiusPx = (rect.width / 2) * (RADAR_CLAMP_PX / 140);
-            let dx = clientX - cx;
-            let dy = clientY - cy;
-            const dist = Math.hypot(dx, dy);
-            if (dist > maxRadiusPx) {
-                const ratio = maxRadiusPx / dist;
-                dx *= ratio; dy *= ratio;
-            }
-            const worldX = dx / RADAR_SCALE;
-            const worldY = -dy / RADAR_SCALE;
+            const rect = document.getElementById('radar').getBoundingClientRect();
+            const [worldX, worldY] = mapToWorld(clientX - (rect.left + rect.width / 2), clientY - (rect.top + rect.height / 2));
             document.getElementById('targetX').value = worldX.toFixed(2);
             document.getElementById('targetY').value = worldY.toFixed(2);
             targetMarker = { x: worldX, y: worldY };
             updateTargetMarkerPosition();
         }
 
+        // pointer handling on the map: a click (left button, no drag) sets the target; dragging with
+        // the left or wheel (middle) button pans; two touch points pinch-zoom + pan; the wheel zooms.
         const radarEl = document.getElementById('radar');
-        radarEl.addEventListener('click', (e) => setTargetFromRadarClick(e.clientX, e.clientY));
-        radarEl.addEventListener('touchstart', (e) => {
-            e.preventDefault();
-            const t = e.touches[0];
-            setTargetFromRadarClick(t.clientX, t.clientY);
+        const mapPointers = new Map();  // pointerId -> {x, y} (last client position)
+        let mapGesture = null;          // {startX, startY, button, moved} for the current press
+
+        radarEl.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0 && e.button !== 1) return;
+            e.preventDefault();  // also stops the browser's middle-click autoscroll
+            radarEl.setPointerCapture(e.pointerId);
+            mapPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (mapPointers.size === 1) {
+                mapGesture = { startX: e.clientX, startY: e.clientY, button: e.button, moved: false };
+            } else if (mapGesture) {
+                mapGesture.moved = true;  // a second finger makes it a pinch, never a click
+            }
+        });
+
+        radarEl.addEventListener('pointermove', (e) => {
+            const prev = mapPointers.get(e.pointerId);
+            if (!prev || !mapGesture) return;
+            if (mapPointers.size === 1) {
+                if (!mapGesture.moved && Math.hypot(e.clientX - mapGesture.startX, e.clientY - mapGesture.startY) > MAP_DRAG_THRESHOLD_PX) {
+                    mapGesture.moved = true;
+                    radarEl.classList.add('panning');
+                }
+                if (mapGesture.moved) panMap(e.clientX - prev.x, e.clientY - prev.y);
+                mapPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            } else if (mapPointers.size === 2) {
+                const [a, b] = [...mapPointers.values()];
+                const before = { mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) };
+                mapPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+                const [c, d] = [...mapPointers.values()];
+                const after = { mx: (c.x + d.x) / 2, my: (c.y + d.y) / 2, d: Math.hypot(c.x - d.x, c.y - d.y) };
+                panMap(after.mx - before.mx, after.my - before.my);
+                if (before.d > 0) zoomMapAt(after.mx, after.my, after.d / before.d);
+            }
+        });
+
+        function endMapPointer(e) {
+            if (!mapPointers.has(e.pointerId)) return;
+            mapPointers.delete(e.pointerId);
+            if (mapPointers.size === 0) {
+                if (mapGesture && !mapGesture.moved && mapGesture.button === 0 && e.type === 'pointerup') {
+                    setTargetFromRadarClick(e.clientX, e.clientY);
+                }
+                mapGesture = null;
+                radarEl.classList.remove('panning');
+            }
+        }
+        radarEl.addEventListener('pointerup', endMapPointer);
+        radarEl.addEventListener('pointercancel', endMapPointer);
+
+        radarEl.addEventListener('wheel', (e) => {
+            e.preventDefault();  // zoom the map instead of scrolling the page
+            // deltaMode 1 = lines (classic mouse wheel on some browsers), 0 = pixels
+            const delta = e.deltaY * (e.deltaMode === 1 ? 33 : 1);
+            zoomMapAt(e.clientX, e.clientY, Math.exp(-delta * 0.0015));
         }, { passive: false });
+
+        document.getElementById('mapResetBtn').addEventListener('click', () => {
+            mapView.zoom = 1.0; mapView.cx = 0.0; mapView.cy = 0.0;
+            renderMapView();
+        });
+        window.addEventListener('resize', renderMapView);
 
         document.getElementById('targetX').addEventListener('change', setTargetFromInputs);
         document.getElementById('targetY').addEventListener('change', setTargetFromInputs);
+        renderMapView();
 
         // ==================== joystick pads (pointer-drag) ====================
         class DragPad {
@@ -995,7 +1159,7 @@
 
         const movePad = new DragPad('movePad', 'moveKnob', false, (dx, dy) => {
             velocityX = -dy * 2.0;  // drag up = forward
-            velocityY = dx * 1.0;   // reference only - no strafing gait on the sim side
+            velocityY = dx * 1.0;   // strafe (drag right = right)
             document.getElementById('moveReadout').textContent = `x${dx.toFixed(2)} y${dy.toFixed(2)}`;
             sendCommand();
         });
@@ -1025,19 +1189,30 @@
         }
 
         function doStand() {
+            releaseAllPads();
             velocityX = 0; velocityY = 0; angularZ = 0;
             sendCommand();
+            // the sim brings a walking robot to a stop first, then blends back into the standing policy
+            socket.emit('stand', {});
+            showToast('Returning to stand');
+        }
+
+        // entered walking speed in m/s, or 0 for the sim's default (it clamps to 0.1-1.4)
+        function enteredSpeed() {
+            const v = parseFloat(document.getElementById('targetSpeed').value);
+            return v > 0 ? v : 0;
         }
 
         function doWalk() {
             const t = currentTarget();
-            socket.emit('goto_target', { x: t.x, y: t.y, gait: 'walk' });
-            showToast(`Walking to (${t.x.toFixed(2)}, ${t.y.toFixed(2)})`);
+            const speed = enteredSpeed();
+            socket.emit('goto_target', { x: t.x, y: t.y, gait: 'walk', speed: speed });
+            showToast(`Walking to (${t.x.toFixed(2)}, ${t.y.toFixed(2)})` + (speed ? ` at ${speed.toFixed(1)} m/s` : ''));
         }
 
         function doRun() {
             const t = currentTarget();
-            socket.emit('goto_target', { x: t.x, y: t.y, gait: 'run' });
+            socket.emit('goto_target', { x: t.x, y: t.y, gait: 'run', speed: 0 });
             showToast(`Running to (${t.x.toFixed(2)}, ${t.y.toFixed(2)})`);
         }
 
@@ -1090,9 +1265,22 @@
         let actionChangedAt = Date.now();
         let historyList = [];
 
+        // 'policy' mode is the Stand PPO policy (not the dance) when the sim runs with one loaded
+        let standPolicy = false;
+        let locoPhase = null;
+        let locoCmd = null;  // velocity command the walking policy is actually following
+
+        function isStanding(mode) {
+            return mode === 'stand' || (mode === 'policy' && standPolicy);
+        }
+
         function actionLabelFor(mode, gait) {
+            if (isStanding(mode)) return 'Standing';
             if (mode === 'policy') return 'Playing Dance 1';
+            if ((mode === 'manual' || mode === 'goto') && ['stopping', 'stopped', 'handover', 'handover_done'].includes(locoPhase)) return 'Stopping';
             if (mode === 'goto') return gait === 'run' ? 'Running to target' : 'Walking to target';
+            // e.g. after Walk/Run arrives: the walking policy keeps stepping in place at zero velocity
+            if (mode === 'manual' && locoCmd && locoCmd.every((v) => Math.abs(v) < 0.01)) return 'Walking in place';
             if (mode === 'manual') return gait === 'run' ? 'Running' : 'Walking';
             return 'Standing';
         }
@@ -1125,7 +1313,7 @@
 
         function updateActiveButtons(mode, gait) {
             ['btnStand', 'btnWalk', 'btnRun'].forEach((id) => document.getElementById(id).classList.remove('active'));
-            if (mode === 'stand') document.getElementById('btnStand').classList.add('active');
+            if (isStanding(mode)) document.getElementById('btnStand').classList.add('active');
             else if (mode === 'manual' || mode === 'goto') document.getElementById(gait === 'run' ? 'btnRun' : 'btnWalk').classList.add('active');
         }
 

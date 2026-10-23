@@ -16,14 +16,13 @@ logic of its own (see that script's docstring).
 Three control modes, switched by DDS command (see the topic table below):
 
 * ``stand``  - hold the default pose.
-* ``manual`` - joystick ``cmd_vel`` drives a simple open-loop sinusoidal (CPG) walking gait. No
-  trained locomotion policy exists in this repo for arbitrary commanded velocities - only in-place
-  motion imitation (AMP dance / ASAP motion-tracking) - so manual/goto driving falls back to a
-  hand-tuned gait. Treat the amplitudes/signs in :class:`CpgGait` as a starting point: verify against
-  this asset's actual joint-axis conventions in sim and retune before relying on it.
-* ``goto``   - given a target ``(x, y)`` and a gait (``walk``/``run``), a proportional controller
-  steers heading then forward speed toward the point using the same CPG gait, and drops back to
-  ``stand`` on arrival.
+* ``manual`` - joystick ``cmd_vel`` (vx, vy, yaw rate) drives the unitree_rl_lab velocity-tracking
+  policy given by ``--loco_policy_dir`` (rsl_rl ``exported/policy.pt`` + ``params/deploy.yaml``), after a
+  staged blend from the current pose into the policy's own stance - see
+  :class:`_LocomotionPolicyController`. Releasing the joystick keeps the policy running at zero
+  velocity.
+* ``goto``   - given a target ``(x, y)`` and a gait (``walk``/``run``), steers the same locomotion
+  policy toward the point (see ``_goto_velocity_command``) and keeps it stepping in place on arrival.
 * ``policy`` - runs the skrl-trained AMP dance policy (``scripts/skrl/train.py`` checkpoint, task
   ``Template-G1-Isaac-AMP-Dance-Direct-v0``) via the environment's own ``step()``, the same inference
   path as ``scripts/skrl/play.py``.
@@ -46,12 +45,13 @@ sim -> web):
 =====================  ==================  ==========================================
 Topic                  Type                Payload
 =====================  ==================  ==========================================
-g1/cmd_vel             g1.CmdVel           manual joystick (linear_x, angular_z used)
-g1/goto_command        g1.GotoCommand      x, y (m), gait ("walk"|"run")
+g1/cmd_vel             g1.CmdVel           manual joystick (linear_x, linear_y, angular_z)
+g1/goto_command        g1.GotoCommand      x, y (m), gait ("walk"|"run"), speed (m/s, 0 = gait default)
 g1/goto_cancel         g1.Trigger          cancel an in-progress goto
 g1/policy_command      g1.PolicyCommand    command: "play" / "stop"
 g1/home_position       g1.Trigger          explicit reset (only way to recover from a fall)
 g1/reset_sim           g1.Trigger          same as home_position, triggered by the "초기화" button
+g1/stand_command       g1.Trigger          back to the standing controller (walking policy: stop, then blend)
 g1/emergency_stop      g1.Trigger          drop to ``stand`` immediately (does NOT reset the sim)
 g1/robot_pose          g1.RobotPose        world pose of the robot base
 g1/joint_states        g1.JointState       body-joint positions/velocities
@@ -123,6 +123,40 @@ parser.add_argument(
     "one - see _StandPolicyController's own docstring for how it's run against this same env/robot. "
     "Pass an empty string to fall back to the old AMP-dance-by-default behavior.",
 )
+_DEFAULT_LOCO_POLICY_DIR = (
+    "/mnt/data/github/Robots/unitree_g1_rl_lab/logs/rsl_rl/finetune_yaw/2026-10-22_18-14-44/exported"
+)
+parser.add_argument(
+    "--loco_policy_dir",
+    type=str,
+    default=_DEFAULT_LOCO_POLICY_DIR,
+    help="unitree_rl_lab rsl_rl 'exported' dir (policy.pt; deploy.yaml read from here or ../params/). "
+    "Required: joystick ('manual') and go-to-point ('goto') driving both run this velocity-tracking "
+    "policy - see _LocomotionPolicyController.",
+)
+parser.add_argument(
+    "--loco_transition_time",
+    type=float,
+    default=0.3,
+    help="Seconds to blend joint targets/gains from the current controller's into the locomotion policy's "
+    "(policy already in the loop - see _LocomotionPolicyController). Verified in sim from the Stand PPO "
+    "stance: 0.3s settles upright with the least drift, 0.6-1.0s still hold but drift ~0.5m while "
+    "recovering, 2.0s falls (too long with only partial policy authority).",
+)
+parser.add_argument(
+    "--loco_handover_time",
+    type=float,
+    default=0.5,
+    help="Seconds to blend from the locomotion policy back to the Stand PPO policy on the web UI's Stand button "
+    "(after the robot has stopped). Verified in sim from forward/turning/strafing/spinning: 0.3-0.5s hold, "
+    "0.5s with the least tilt; a direct switch tilts ~30 deg, 1.0s+ falls.",
+)
+parser.add_argument(
+    "--loco_warmup_time",
+    type=float,
+    default=1.0,
+    help="Seconds the locomotion policy runs at zero velocity before the joystick command is applied.",
+)
 parser.add_argument(
     "--dds_domain_id", type=int, default=0, help="CycloneDDS domain id (must match the web controller)."
 )
@@ -163,6 +197,9 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+# checked before AppLauncher below so a missing policy fails fast instead of after Isaac Sim boots
+if not args_cli.loco_policy_dir:
+    parser.error("--loco_policy_dir is required (joystick/go-to-point have no other controller)")
 # the head camera needs RTX rendering enabled even in headless mode - see AppLauncher's own
 # --enable_cameras flag; harmless (a no-op) if --no_camera is also passed.
 if not args_cli.no_camera:
@@ -188,6 +225,7 @@ import threading
 import time
 
 import gymnasium as gym
+import numpy as np
 import torch
 from PIL import Image
 
@@ -195,6 +233,7 @@ from g1_dds_types import (
     TOPIC_CAMERA_FRAME,
     TOPIC_CMD_VEL,
     TOPIC_EMERGENCY_STOP,
+    TOPIC_STAND_COMMAND,
     TOPIC_GOTO_CANCEL,
     TOPIC_GOTO_COMMAND,
     TOPIC_HOME_POSITION,
@@ -238,7 +277,7 @@ AGENT_CFG_ENTRY_POINT = "skrl_amp_cfg_entry_point"
 
 # ---------------------------------------------------------------------------
 # Trained-standing pose/gain snapshot, applied to this env's own robot at startup (see
-# _apply_trained_stand_defaults below) so "stand" mode (CpgGait's zero-offset default) and every
+# _apply_trained_stand_defaults below) so "stand" mode (a zero action, i.e. a PD hold of the default pose) and every
 # env.reset() hold *this* pose/gain rather than isaaclab_assets' untrained default.
 #
 # Source: a converged G1-PPO-Direct-Stand-v0 policy (checkpoint logs/skrl/g1_stand/
@@ -555,55 +594,475 @@ class _StandPolicyController:
         button, see main()'s do_reset handling)."""
         self.prev_gain_action = torch.zeros(1, 2 * self.n_gain_cat, device=self.device)
 
+    def restore_default_gains(self) -> None:
+        """Write each gain-searched actuator's stiffness/damping back to its own cached
+        ``default_stiffness``/``default_damping`` (captured in ``__init__`` before this policy ever
+        touched them).
 
-# ---------------------------------------------------------------------------
-# Heuristic CPG walking gait (see module docstring: no trained velocity-command locomotion policy
-# exists in this repo, only in-place motion imitation - manual/goto driving needs its own controller).
-# ---------------------------------------------------------------------------
-class CpgGait:
-    """Open-loop sinusoidal gait producing per-joint position offsets (radians) from the default pose."""
+        ``step()`` above overwrites legs/feet/waist stiffness+damping live, every step, as one half of
+        the policy's own action - and nothing else in this process ever puts them back. Isaac Lab's PD
+        actuators apply essentially zero torque at zero (or very low) gain, so leaving mode="policy"
+        with a low gain still latched in means the legs go completely unresponsive to *any* later
+        position command (the "stand" mode's default-pose hold included) even though the command itself is
+        fine - the actuator just isn't allowed to act on it. Call this on every transition *out* of
+        "policy" mode (see main()'s own mode-change handling) so manual/goto/stand always start from a
+        known-good gain, the same way ``reset()`` above already restores ``prev_gain_action``.
+        """
+        for actuator_name, actuator, write_ids, default_stiffness, default_damping in self._gain_targets:
+            if actuator_name == "waist":
+                self.robot.write_joint_stiffness_to_sim(default_stiffness, joint_ids=write_ids)
+                self.robot.write_joint_damping_to_sim(default_damping, joint_ids=write_ids)
+            else:
+                actuator.stiffness[:, write_ids] = default_stiffness
+                actuator.damping[:, write_ids] = default_damping
 
-    def __init__(self, joint_names: list[str]):
-        self._index = {name: i for i, name in enumerate(joint_names)}
-        self.num_joints = len(joint_names)
-        self.phase = 0.0
 
-    def _set(self, offsets: list[float], name: str, value: float) -> None:
-        idx = self._index.get(name)
-        if idx is not None:
-            offsets[idx] = value
+# Unitree SDK motor order for the 29-DOF G1 - deploy.yaml's ``joint_ids_map``/``stiffness``/``damping``
+# are expressed against this list (same as unitree_rl_lab's UNITREE_G1_29DOF_CFG.joint_sdk_names).
+_G1_SDK_JOINT_NAMES = [
+    "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint", "left_knee_joint",
+    "left_ankle_pitch_joint", "left_ankle_roll_joint",
+    "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint", "right_knee_joint",
+    "right_ankle_pitch_joint", "right_ankle_roll_joint",
+    "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint", "left_elbow_joint",
+    "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint", "right_elbow_joint",
+    "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+]  # fmt: skip
+# Full-deflection values the web UI's joystick sends on g1/cmd_vel (g1_web_ui_mobile_first.html's
+# movePad/rotPad: linear_x = -dy * 2.0, linear_y = dx * 1.0, angular_z = dx * 1.0) - used to normalize
+# them back to [-1, 1] before scaling into the locomotion policy's own trained command range.
+_JOYSTICK_FULL_SCALE = (2.0, 1.0, 1.0)
 
-    def step(self, dt: float, forward: float, turn: float, gait: str) -> list[float]:
-        """Advance the gait phase by ``dt`` and return this step's joint offsets."""
-        offsets = [0.0] * self.num_joints
-        speed = abs(forward)
-        if gait == "stand" or speed < 0.05:
-            self.phase = 0.0
-            return offsets
 
-        frequency = (1.0 + 0.6 * speed) if gait == "walk" else (1.6 + 0.8 * speed)
-        amplitude = 0.35 if gait == "walk" else 0.55
-        self.phase = (self.phase + 2.0 * math.pi * frequency * dt) % (2.0 * math.pi)
-        direction = 1.0 if forward >= 0.0 else -1.0
-        turn = max(-1.0, min(1.0, turn))
-        s_left = math.sin(self.phase)
-        s_right = math.sin(self.phase + math.pi)
+class _LocomotionPolicyController:
+    """Runs a unitree_rl_lab velocity-tracking policy (rsl_rl ``exported/policy.pt`` + the run's own
+    ``params/deploy.yaml``) against this script's robot for joystick ('manual') driving.
 
-        # legs: hip pitch swings the leg fwd/back, knee flexes during swing, ankle keeps the foot level
-        self._set(offsets, "left_hip_pitch_joint", direction * amplitude * s_left)
-        self._set(offsets, "right_hip_pitch_joint", direction * amplitude * s_right)
-        self._set(offsets, "left_knee_joint", 0.15 + amplitude * 1.3 * max(0.0, -s_left))
-        self._set(offsets, "right_knee_joint", 0.15 + amplitude * 1.3 * max(0.0, -s_right))
-        self._set(offsets, "left_ankle_pitch_joint", -direction * amplitude * 0.5 * s_left)
-        self._set(offsets, "right_ankle_pitch_joint", -direction * amplitude * 0.5 * s_right)
-        # arms swing opposite the same-side leg for balance
-        self._set(offsets, "left_shoulder_pitch_joint", -direction * amplitude * 0.6 * s_left)
-        self._set(offsets, "right_shoulder_pitch_joint", -direction * amplitude * 0.6 * s_right)
-        # turning: small waist/hip-roll bias, no dedicated strafing gait (lateral cmd_vel is ignored)
-        self._set(offsets, "waist_yaw_joint", 0.15 * turn)
-        self._set(offsets, "left_hip_roll_joint", 0.05 * turn)
-        self._set(offsets, "right_hip_roll_joint", -0.05 * turn)
-        return offsets
+    The policy was trained on a different env than the one this script runs (unitree_rl_lab's
+    ManagerBasedRLEnv: 50 Hz control, implicit PD with deploy.yaml's gains) - so, as with
+    _StandPolicyController, nothing about the AMP env's own obs/action pipeline is reused:
+
+    - observation: rebuilt here term by term in deploy.yaml's ``observations`` order, each term scaled
+      and stacked over ``history_length`` frames oldest-first, then concatenated term by term - the
+      same layout Isaac Lab's ObservationManager produces for a group with per-term history (first
+      push fills the whole history, same as CircularBuffer after a reset).
+    - action: ``target = offset + scale * action`` in the policy's own joint order, converted to the
+      AMP env's 29-dim action (``target = default_joint_pos + action * amp_action_scale``) for
+      env.step(). The policy runs every ``round(policy_dt / env_step_dt)`` env steps and its target is
+      held in between.
+    - gain: legs/feet/waist/arms stiffness+damping (and armature) are switched to deploy.yaml's trained
+      values while this controller drives the robot, written through the same explicit-tensor vs.
+      write_joint_*_to_sim split as _apply_trained_stand_defaults (see its docstring), and restored on
+      exit via restore_default_gains().
+
+    Switching straight from a standing pose into a walking policy topples the robot (different pose,
+    gains and an empty action history all change at once), so begin_transition() runs a staged
+    hand-over first:
+
+    1. ``interp``: the policy already runs (zero velocity command), but the commanded joint target
+       *and* PD gains blend (smoothstep) from whatever was being commanded the instant before
+       (``robot.data.joint_pos_target`` + the live gains - no torque discontinuity on the first step)
+       to the policy's own output and trained gains. The policy has to be in the loop here: an
+       open-loop blend of PD targets toward its default pose has nothing balancing the robot, and was
+       verified in sim to tip the G1 over sideways out of the Stand PPO policy's leaning stance.
+    2. ``warmup``: pure policy, still at zero velocity, so it settles into its own stepping stance
+       before any motion is asked of it.
+    3. ``active``: joystick velocity, rate-limited (see _CMD_ACCEL), is fed to the policy.
+    """
+
+    # max command change rate (vx/vy in m/s^2, wz in rad/s^2) - a joystick slammed to full deflection
+    # becomes a ramp instead of a step the policy never saw during training.
+    _CMD_ACCEL = (1.0, 1.0, 1.5)
+    _JOYSTICK_DEADZONE = 0.05
+    # warmup only hands over to the joystick once the robot has been this calm for _STABLE_HOLD seconds
+    # (|projected gravity xy| ~ sin(tilt), base xy speed in m/s) - not just after a fixed time, so a
+    # hand-over that left the robot still recovering never gets a velocity command on top of it.
+    _STABLE_TILT = 0.12
+    _STABLE_SPEED = 0.3
+    _STABLE_HOLD = 0.5
+    # request_stop(): hand over only once base xy speed stays under this (m/s) for _STABLE_HOLD seconds,
+    # or _STOP_TIMEOUT seconds after the command reached zero regardless (the zero-velocity policy never fully freezes - it keeps
+    # stepping in place on its gait clock)
+    _STOPPED_SPEED = 0.15
+    _STOP_TIMEOUT = 4.0
+
+    def __init__(
+        self,
+        robot,
+        policy_dir: str,
+        device: str,
+        amp_body_joint_ids: list[int],
+        amp_action_scale: float,
+        env_step_dt: float,
+        transition_time: float,
+        warmup_time: float,
+        handover_time: float,
+    ):
+        import yaml
+
+        from isaaclab.actuators import ImplicitActuator
+
+        policy_dir = os.path.abspath(policy_dir)
+        policy_path = os.path.join(policy_dir, "policy.pt")
+        deploy_path = next(
+            (
+                p
+                for p in (os.path.join(policy_dir, "deploy.yaml"), os.path.join(policy_dir, "..", "params", "deploy.yaml"))
+                if os.path.isfile(p)
+            ),
+            None,
+        )
+        if deploy_path is None:
+            raise FileNotFoundError(f"deploy.yaml not found next to {policy_dir} or in its ../params/")
+        print(f"[g1_isaac_sim_bridge] Loading locomotion policy: {policy_path} (cfg: {os.path.abspath(deploy_path)})")
+        with open(deploy_path) as f:
+            deploy = yaml.safe_load(f)
+        self.policy = torch.jit.load(policy_path, map_location=device).eval()
+
+        self.robot = robot
+        self.device = device
+        self.transition_time = transition_time
+        self.warmup_time = warmup_time
+        self.env_step_dt = env_step_dt
+        self.policy_dt = float(deploy["step_dt"])
+        self.policy_decimation = max(1, round(self.policy_dt / env_step_dt))
+        if abs(self.policy_decimation * env_step_dt - self.policy_dt) > 1e-6:
+            print(
+                f"[g1_isaac_sim_bridge] WARNING: policy step_dt {self.policy_dt} is not a multiple of the env "
+                f"step_dt {env_step_dt} - running the policy every {self.policy_decimation} env steps"
+            )
+
+        # policy joint order (the training env's own articulation order) -> names -> this robot's ids
+        sdk_ids = deploy["joint_ids_map"]
+        self.joint_names = [_G1_SDK_JOINT_NAMES[i] for i in sdk_ids]
+        self.joint_ids, _ = robot.find_joints(self.joint_names, preserve_order=True)
+        self.amp_action_index = [amp_body_joint_ids.index(j) for j in self.joint_ids]
+        self.n_amp_joints = len(amp_body_joint_ids)
+        self.amp_action_scale = amp_action_scale
+
+        def _tensor(values):
+            return torch.tensor(values, dtype=torch.float32, device=device)
+
+        self.default_pos = _tensor(deploy["default_joint_pos"])
+        # stiffness/damping are stored in SDK order (see export_deploy_cfg.py), the rest in policy order
+        self.trained_stiffness = _tensor([deploy["stiffness"][i] for i in sdk_ids])
+        self.trained_damping = _tensor([deploy["damping"][i] for i in sdk_ids])
+        # unitree_rl_lab's UNITREE_G1_29DOF_CFG gives every actuator armature=0.01 (not exported to deploy.yaml)
+        self.trained_armature = torch.full_like(self.default_pos, 0.01)
+        action_cfg = deploy["actions"]["JointPositionAction"]
+        self.action_scale = _tensor(action_cfg["scale"])
+        self.action_offset = _tensor(action_cfg["offset"])
+        self.action_clip = action_cfg.get("clip")
+
+        ranges = deploy["commands"]["base_velocity"]["ranges"]
+        self.cmd_ranges = (ranges["lin_vel_x"], ranges["lin_vel_y"], ranges["ang_vel_z"])
+
+        self.obs_terms = []  # (name, scale tensor, history_length, params)
+        for name, term_cfg in deploy["observations"].items():
+            if name not in self._OBS_TERM_DIMS:
+                raise ValueError(f"Unsupported observation term in {deploy_path}: {name!r}")
+            dim = self._obs_term_dim(name)
+            scale = term_cfg.get("scale")
+            scale_t = _tensor(scale) if scale is not None else torch.ones(dim, device=device)
+            self.obs_terms.append((name, scale_t, int(term_cfg.get("history_length") or 1), term_cfg.get("params") or {}))
+        obs_dim = sum(self._obs_term_dim(name) * hist for name, _, hist, _ in self.obs_terms)
+        try:
+            with torch.inference_mode():
+                self.policy(torch.zeros(1, obs_dim, device=device))
+        except RuntimeError as exc:
+            raise ValueError(f"Locomotion obs dim {obs_dim} (from {deploy_path}) doesn't fit {policy_path}") from exc
+
+        # per-actuator gain write targets: (actuator, is_implicit, robot joint ids, actuator-local ids, policy idx)
+        self._gain_groups = []
+        for actuator in robot.actuators.values():
+            policy_idx = [i for i, n in enumerate(self.joint_names) if n in actuator.joint_names]
+            if not policy_idx:
+                continue
+            self._gain_groups.append(
+                (
+                    actuator,
+                    isinstance(actuator, ImplicitActuator),
+                    [self.joint_ids[i] for i in policy_idx],
+                    torch.tensor([actuator.joint_names.index(self.joint_names[i]) for i in policy_idx], device=device),
+                    torch.tensor(policy_idx, device=device),
+                )
+            )
+        # this robot's own gains/armature, captured before anything has run - see restore_default_gains()
+        self.default_stiffness, self.default_damping = self._read_gains()
+        self.default_armature = robot.data.joint_armature[0, self.joint_ids].clone()
+
+        self.handover_time = handover_time
+        self.phase = "idle"
+        self._phase_time = 0.0
+        self._stop_requested = False
+        self._desired = torch.zeros(3, device=device)
+        self._default_accel = torch.tensor(self._CMD_ACCEL, device=device)
+        self._cmd_accel = self._default_accel.clone()
+        self._cmd = torch.zeros(3, device=device)
+        print(
+            f"[g1_isaac_sim_bridge] Locomotion policy ready: obs {obs_dim}, 29 joints, every {self.policy_decimation} "
+            f"env steps, cmd ranges vx={self.cmd_ranges[0]} vy={self.cmd_ranges[1]} wz={self.cmd_ranges[2]}"
+        )
+
+    _OBS_TERM_DIMS = {
+        "base_ang_vel": 3,
+        "projected_gravity": 3,
+        "velocity_commands": 3,
+        "joint_pos_rel": None,  # number of policy joints
+        "joint_vel_rel": None,
+        "last_action": None,
+        "gait_phase": 2,
+    }
+
+    def _obs_term_dim(self, name: str) -> int:
+        return self._OBS_TERM_DIMS[name] or len(self.joint_names)
+
+    def _read_gains(self) -> tuple[torch.Tensor, torch.Tensor]:
+        stiffness = torch.zeros_like(self.default_pos)
+        damping = torch.zeros_like(self.default_pos)
+        for actuator, is_implicit, robot_ids, local_ids, policy_idx in self._gain_groups:
+            if is_implicit:
+                stiffness[policy_idx] = self.robot.data.joint_stiffness[0, robot_ids]
+                damping[policy_idx] = self.robot.data.joint_damping[0, robot_ids]
+            else:
+                stiffness[policy_idx] = actuator.stiffness[0, local_ids]
+                damping[policy_idx] = actuator.damping[0, local_ids]
+        return stiffness, damping
+
+    def _write_gains(self, stiffness: torch.Tensor, damping: torch.Tensor) -> None:
+        for actuator, is_implicit, robot_ids, local_ids, policy_idx in self._gain_groups:
+            if is_implicit:
+                self.robot.write_joint_stiffness_to_sim(stiffness[policy_idx].unsqueeze(0), joint_ids=robot_ids)
+                self.robot.write_joint_damping_to_sim(damping[policy_idx].unsqueeze(0), joint_ids=robot_ids)
+            else:
+                actuator.stiffness[:, local_ids] = stiffness[policy_idx]
+                actuator.damping[:, local_ids] = damping[policy_idx]
+
+    @torch.inference_mode()
+    def begin_transition(self) -> None:
+        """Start the staged hand-over (see class docstring) from whatever is being commanded right now.
+        Must be called *before* anything else (e.g. _StandPolicyController.restore_default_gains) touches
+        the live gains on this step, so the blend starts from the gains actually in effect."""
+        self._start_target = self.robot.data.joint_pos_target[0, self.joint_ids].clone()
+        self._start_stiffness, self._start_damping = self._read_gains()
+        self.robot.write_joint_armature_to_sim(self.trained_armature.unsqueeze(0), joint_ids=self.joint_ids)
+        self._target = self._start_target.clone()
+        self._cmd = torch.zeros(3, device=self.device)
+        self._reset_policy_state()
+        self._stop_requested = False
+        self.phase, self._phase_time = "interp", 0.0
+        print(f"[g1_isaac_sim_bridge] Locomotion: blending into policy control over {self.transition_time:.1f}s")
+
+    @torch.inference_mode()
+    def restore_default_gains(self) -> None:
+        """Put back this robot's own gains/armature (see _StandPolicyController.restore_default_gains for
+        why leaving a mode without this leaves the next controller fighting the wrong gains)."""
+        self._write_gains(self.default_stiffness, self.default_damping)
+        self.robot.write_joint_armature_to_sim(self.default_armature.unsqueeze(0), joint_ids=self.joint_ids)
+        self.phase = "idle"
+
+    def set_joystick(self, linear_x: float, linear_y: float, angular_z: float) -> None:
+        """Raw g1/cmd_vel values -> normalized [-1, 1] stick deflection in the robot's own frame (+x
+        forward, +y left, +z counter-clockwise). The UI's linear_y/angular_z are positive for a drag to
+        the *right*, hence the sign flips."""
+        raw = (linear_x / _JOYSTICK_FULL_SCALE[0], -linear_y / _JOYSTICK_FULL_SCALE[1], -angular_z / _JOYSTICK_FULL_SCALE[2])
+        stick = [0.0 if abs(v) < self._JOYSTICK_DEADZONE else max(-1.0, min(1.0, v)) for v in raw]
+        # positive deflection scales to the range's upper bound, negative to its lower bound, so an
+        # asymmetric range (e.g. vx in [-0.5, 1.0]) still uses the full stick travel both ways
+        cmd = [v * (hi if v > 0 else -lo) for v, (lo, hi) in zip(stick, self.cmd_ranges)]
+        self._desired = torch.tensor(cmd, dtype=torch.float32, device=self.device)
+        self._cmd_accel = torch.tensor(self._CMD_ACCEL, device=self.device)
+
+    def set_velocity_command(self, vx: float, vy: float, wz: float, linear_accel: float | None = None) -> None:
+        """Desired base velocity in m/s / rad/s (robot frame), e.g. from the go-to-point controller -
+        used as given, *not* clipped to the trained command range (that's the caller's call, see
+        _GOTO_RUN_SPEED). ``linear_accel`` (m/s^2) overrides _CMD_ACCEL's vx/vy ramp rate, so a run
+        builds up speed gradually instead of at joystick rate."""
+        self._desired = torch.tensor([vx, vy, wz], dtype=torch.float32, device=self.device)
+        accel = list(self._CMD_ACCEL)
+        if linear_accel is not None:
+            accel[0] = accel[1] = linear_accel
+        self._cmd_accel = torch.tensor(accel, device=self.device)
+
+    def _desired_command(self) -> torch.Tensor:
+        return self._desired
+
+    def _reset_policy_state(self) -> None:
+        self._last_action = torch.zeros_like(self.default_pos)
+        self._history = {}
+        self._policy_steps = 0
+        self._substep = 0
+
+    def _compute_obs_term(self, name: str, params: dict) -> torch.Tensor:
+        data = self.robot.data
+        if name == "base_ang_vel":
+            return data.root_ang_vel_b[0]
+        if name == "projected_gravity":
+            return data.projected_gravity_b[0]
+        if name == "velocity_commands":
+            return self._cmd
+        if name == "joint_pos_rel":
+            return data.joint_pos[0, self.joint_ids] - self.default_pos
+        if name == "joint_vel_rel":
+            return data.joint_vel[0, self.joint_ids]
+        if name == "last_action":
+            return self._last_action
+        # gait_phase: same clock as unitree_rl_lab's mdp.gait_phase (episode steps * step_dt), started
+        # from 0 when the policy takes over, like a fresh episode
+        period = float(params.get("period", 0.8))
+        phase = (self._policy_steps * self.policy_dt) % period / period
+        return torch.tensor(
+            [math.sin(2.0 * math.pi * phase), math.cos(2.0 * math.pi * phase)], dtype=torch.float32, device=self.device
+        )
+
+    def _policy_step(self) -> None:
+        if self.phase in ("active", "stopping"):
+            desired = self._desired_command() if self.phase == "active" else torch.zeros(3, device=self.device)
+            # a gentler set_velocity_command ramp only slows speeding *up* - slowing down always gets
+            # _CMD_ACCEL, so e.g. the go-to-point controller can still brake in time for its target
+            slowing = desired.abs() < self._cmd.abs()
+            accel = torch.where(slowing, torch.maximum(self._cmd_accel, self._default_accel), self._cmd_accel)
+            max_delta = accel * self.policy_dt
+            self._cmd = self._cmd + torch.clamp(desired - self._cmd, -max_delta, max_delta)
+        else:
+            self._cmd = torch.zeros(3, device=self.device)
+
+        parts = []
+        for name, scale, history_length, params in self.obs_terms:
+            frame = self._compute_obs_term(name, params) * scale
+            hist = self._history.get(name)
+            if hist is None:
+                hist = frame.unsqueeze(0).repeat(history_length, 1)
+            else:
+                hist = torch.cat((hist[1:], frame.unsqueeze(0)), dim=0)
+            self._history[name] = hist
+            parts.append(hist.reshape(-1))
+        obs = torch.cat(parts).unsqueeze(0)
+
+        action = self.policy(obs)[0]
+        if self.action_clip is not None:
+            action = torch.clamp(action, -float(self.action_clip), float(self.action_clip))
+        self._last_action = action
+        self._policy_target = self.action_offset + self.action_scale * action
+        self._policy_steps += 1
+
+    def _update_stable_time(self, max_speed: float) -> None:
+        gravity_xy = self.robot.data.projected_gravity_b[0, :2]
+        speed_xy = self.robot.data.root_lin_vel_b[0, :2]
+        stable = (
+            torch.linalg.norm(gravity_xy).item() < self._STABLE_TILT
+            and torch.linalg.norm(speed_xy).item() < max_speed
+        )
+        self._stable_time = self._stable_time + self.env_step_dt if stable else 0.0
+
+    def request_stop(self) -> None:
+        """Begin bringing the robot to rest for a hand-over to another (standing) controller: the
+        command ramps to zero and the policy keeps balancing until the robot has been calm for a while
+        (see ``ready_for_handover``). Requested during the walk-in blend, it starts once that's done.
+        Braking always uses _CMD_ACCEL, even after a gentler set_velocity_command ramp - a run slowed at
+        its own 0.3 m/s^2 build-up rate was still moving when _STOP_TIMEOUT ran out and fell over."""
+        self._stop_requested = True
+        self._cmd_accel = torch.tensor(self._CMD_ACCEL, device=self.device)
+
+    @property
+    def ready_for_handover(self) -> bool:
+        return self.phase == "stopped"
+
+    def step(self) -> torch.Tensor:
+        """Advance one env step; returns the 29-dim AMP-shaped action for env.step()."""
+        self._phase_time += self.env_step_dt
+        if self._stop_requested and self.phase in ("warmup", "active"):
+            self._stop_requested = False
+            self.phase, self._phase_time, self._stable_time = "stopping", 0.0, 0.0
+            print("[g1_isaac_sim_bridge] Locomotion: stopping for hand-over to the standing controller")
+        if self.phase == "warmup":
+            self._update_stable_time(self._STABLE_SPEED)
+            if self._phase_time >= self.warmup_time and self._stable_time >= self._STABLE_HOLD:
+                self.phase = "active"
+                print(f"[g1_isaac_sim_bridge] Locomotion: joystick active (after {self._phase_time:.1f}s warmup)")
+        elif self.phase == "stopping":
+            # stricter speed bound than warmup's: hand over only once the robot has actually stopped
+            self._update_stable_time(self._STOPPED_SPEED)
+            if torch.any(self._cmd != 0):
+                self._phase_time = 0.0  # the timeout only counts once the command has ramped to zero
+            if self._stable_time >= self._STABLE_HOLD or self._phase_time >= self._STOP_TIMEOUT:
+                self.phase = "stopped"
+                print(f"[g1_isaac_sim_bridge] Locomotion: stopped ({self._phase_time:.1f}s after the command reached zero)")
+        if self._substep % self.policy_decimation == 0:
+            self._policy_step()
+        self._substep += 1
+
+        if self.phase == "interp":
+            t = min(1.0, self._phase_time / max(self.transition_time, 1e-6))
+            alpha = t * t * (3.0 - 2.0 * t)  # smoothstep: zero blend rate at both ends
+            self._target = self._start_target + alpha * (self._policy_target - self._start_target)
+            self._write_gains(
+                self._start_stiffness + alpha * (self.trained_stiffness - self._start_stiffness),
+                self._start_damping + alpha * (self.trained_damping - self._start_damping),
+            )
+            if t >= 1.0:
+                self.phase, self._phase_time, self._stable_time = "warmup", 0.0, 0.0
+                print("[g1_isaac_sim_bridge] Locomotion: policy in full control (zero-velocity warmup)")
+        else:
+            self._target = self._policy_target
+
+        return self._to_amp_action(self._target)
+
+    def _to_amp_action(self, target: torch.Tensor) -> torch.Tensor:
+        amp_action = torch.zeros(1, self.n_amp_joints, device=self.device)
+        amp_action[0, self.amp_action_index] = (
+            target - self.robot.data.default_joint_pos[0, self.joint_ids]
+        ) / self.amp_action_scale
+        return amp_action
+
+    @torch.inference_mode()
+    def begin_handover(self) -> None:
+        """Start blending out to the next controller (see handover_step) from this policy's current
+        target/gains. Call once ``ready_for_handover``."""
+        self._from_target = self._target.clone()
+        self._from_stiffness, self._from_damping = self._read_gains()
+        self.phase, self._phase_time = "handover", 0.0
+        print(f"[g1_isaac_sim_bridge] Locomotion: handing over to the standing controller over {self.handover_time:.1f}s")
+
+    def handover_step(self, next_controller_step) -> torch.Tensor:
+        """One env step of the hand-over: joint targets and gains blend (smoothstep) from this policy's
+        last ones to the next controller's, which keeps running closed-loop the whole time. Switching
+        straight over was verified in sim to throw the G1 to ~25-30 deg of tilt.
+
+        ``next_controller_step``: callable returning that controller's 29-dim AMP-shaped action for
+        this step. It may write its own gains (as _StandPolicyController.step does) - those, plus this
+        robot's defaults for any joint it doesn't write, are what the gains blend toward. Once
+        ``handover_done``, the caller switches mode and calls restore_default_gains()."""
+        self._phase_time += self.env_step_dt
+        t = min(1.0, self._phase_time / max(self.handover_time, 1e-6))
+        alpha = t * t * (3.0 - 2.0 * t)
+        self._write_gains(self.default_stiffness, self.default_damping)
+        next_action = next_controller_step()
+        next_stiffness, next_damping = self._read_gains()
+        self._write_gains(
+            self._from_stiffness + alpha * (next_stiffness - self._from_stiffness),
+            self._from_damping + alpha * (next_damping - self._from_damping),
+        )
+        next_target = (
+            self.robot.data.default_joint_pos[0, self.joint_ids]
+            + next_action[0, self.amp_action_index] * self.amp_action_scale
+        )
+        self._target = self._from_target + alpha * (next_target - self._from_target)
+        if t >= 1.0:
+            self.phase = "handover_done"
+        # joints outside the policy's 29 (none today) keep the next controller's own action
+        action = next_action.clone()
+        action[0, self.amp_action_index] = self._to_amp_action(self._target)[0, self.amp_action_index]
+        return action
+
+    @property
+    def handover_done(self) -> bool:
+        return self.phase == "handover_done"
+
+    def status(self) -> dict:
+        return {"phase": self.phase, "cmd": [round(v, 3) for v in self._cmd.tolist()]}
 
 
 def _yaw_from_quat_wxyz(quat: torch.Tensor) -> float:
@@ -612,26 +1071,35 @@ def _yaw_from_quat_wxyz(quat: torch.Tensor) -> float:
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
-def _goto_command(
-    robot_xy: tuple[float, float],
-    yaw: float,
-    target_xy: tuple[float, float],
-    max_speed: float,
-    arrive_radius: float = 0.15,
+# Go-to-point on the locomotion policy (web UI Walk/Run + target x, y [+ velocity]). Run speed is a
+# *command* value, past the policy's trained 1.0 m/s - it tracks ~1.02 m/s actual there; verified in
+# sim with a 0.3 m/s^2 ramp, a 0.5 rad/s turn at speed and a stop -> Stand PPO hand-over: 1.0-1.4 never
+# fell (tilt <= 0.12), 1.6 fell 1 of 2 with ~0.2 tilt and only ~0.04 m/s more actual speed.
+_GOTO_WALK_SPEED = 0.5  # m/s, Walk when no velocity is entered
+_GOTO_RUN_SPEED = 1.4  # m/s command - also the cap for an entered velocity
+_GOTO_MIN_SPEED = 0.1
+_GOTO_ACCEL = 0.3  # m/s^2 - speed builds up gradually (braking still uses the policy's _CMD_ACCEL)
+_GOTO_ARRIVE_RADIUS = 0.2  # m
+_GOTO_SLOWDOWN_GAIN = 0.8  # 1/s: speed limit = gain * distance, so it eases into the target
+
+
+def _goto_velocity_command(
+    robot_xy: tuple[float, float], yaw: float, target_xy: tuple[float, float], speed: float, max_yaw_rate: float
 ) -> tuple[float, float, float, bool]:
-    """Proportional go-to-point steering: face the target, then walk toward it. Returns
-    ``(forward, turn, distance, arrived)``."""
+    """Robot-frame (vx, wz) toward a target for the locomotion policy. The bearing to the target vs
+    the robot's own heading gives the heading error: yaw rate steers it out (capped at the policy's
+    trained range), forward speed fades out with it (zero past 60 deg - turn in place first) and with
+    the distance left. Returns ``(vx, wz, distance, arrived)``."""
     dx, dy = target_xy[0] - robot_xy[0], target_xy[1] - robot_xy[1]
     distance = math.hypot(dx, dy)
-    if distance < arrive_radius:
+    if distance < _GOTO_ARRIVE_RADIUS:
         return 0.0, 0.0, distance, True
     heading_err = math.atan2(dy, dx) - yaw
     heading_err = math.atan2(math.sin(heading_err), math.cos(heading_err))
-    turn = max(-1.0, min(1.0, 2.0 * heading_err))
-    slow_for_turn = max(0.0, 1.0 - abs(heading_err) / (math.pi / 2.0))
-    slow_for_arrival = min(1.0, distance / 0.5)
-    forward = max_speed * slow_for_turn * slow_for_arrival
-    return forward, turn, distance, False
+    wz = max(-max_yaw_rate, min(max_yaw_rate, 1.5 * heading_err))
+    align = max(0.0, (math.cos(heading_err) - 0.5) / 0.5)
+    vx = min(speed, _GOTO_SLOWDOWN_GAIN * distance) * align
+    return vx, wz, distance, False
 
 
 def _agent_act(agent, obs_tensor: torch.Tensor):
@@ -672,6 +1140,25 @@ def _raise_if_sensor_init_failed(sensor_name: str) -> None:
         raise RuntimeError(f"{sensor_name} sensor failed to initialize (see chained exception below)") from exc
 
 
+def _robot_body_prim_path(body_name: str, robot_prim_path: str = "/World/envs/env_0/Robot") -> str:
+    """Stage path of one of the robot's rigid-body links, found by searching under the robot prim.
+
+    Must not be built as ``f"{robot_prim_path}/{body_name}"``: G1_LOCAL_USD_PATH nests every link one
+    level deeper (``.../Robot/g1_full_collision/torso_link``), so that guessed path doesn't exist - and
+    spawning a sensor there silently creates a brand-new, static Xform instead, i.e. a camera/lidar
+    fixed in the world rather than riding on the robot. Matching on RigidBodyAPI also skips same-named
+    collision sub-prims (e.g. ``torso_link/collisions/head_link``).
+    """
+    from pxr import Usd, UsdPhysics
+
+    from isaaclab.sim.utils.stage import get_current_stage
+
+    for prim in Usd.PrimRange(get_current_stage().GetPrimAtPath(robot_prim_path)):
+        if prim.GetName() == body_name and prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            return str(prim.GetPath())
+    raise RuntimeError(f"No rigid body named {body_name!r} under {robot_prim_path}")
+
+
 def _find_camera_mount_body(body_names: list[str]) -> str:
     """Pick a body to mount the camera on: prefer a head-ish link, then torso/pelvis, else whatever
     the first body is. Exact link names vary by G1 USD build, hence the defensive fallback chain
@@ -684,38 +1171,31 @@ def _find_camera_mount_body(body_names: list[str]) -> str:
     return body_names[0]
 
 
+# Neck camera mount, in torso_link's own frame (+X forward, +Z up). Measured off G1_LOCAL_USD_PATH:
+# the head's collision mesh spans z=0.28..0.49 m above torso_link (so the neck - the bottom of the
+# head - is at ~0.29 m) and reaches x=+0.079 m at the front, so x=0.09 puts the lens just clear of
+# the face. (The asset's own d435_link sits higher, z=0.43, and is pitched 47.6 deg down at the floor.)
+_NECK_CAMERA_POS = (0.09, 0.0, 0.29)
+_NECK_CAMERA_PITCH_DEG = 10.0  # slight downward tilt so the floor right in front of the feet is in view
+
+
 def _attach_head_camera(robot, scene, width: int, height: int) -> Camera:
-    """Spawn a forward-looking RGB camera on the (single, num_envs=1) robot instance and return the
-    live sensor object.
+    """Spawn a forward-looking RGB camera on the robot's neck (the (single, num_envs=1) robot's
+    ``torso_link``, see _NECK_CAMERA_POS) and return the live sensor object.
 
-    This G1 USD ships a ``d435_link`` prim - the mount frame for the real robot's head-mounted Intel
-    RealSense D435, at head height with a baked-in ~48-degree pitch already tuned by Unitree so its
-    local +X axis looks forward out of the robot's face. It's a fixed sub-frame of the torso body
-    (no joint of its own), so it never shows up in ``robot.body_names`` - have to check for it
-    directly on the USD stage. Falls back to a guessed offset on a head/torso/pelvis body if this
-    G1 build doesn't have it.
+    The camera prim is a child of the torso link's own prim (found via _robot_body_prim_path), so it
+    moves and turns with the robot.
     """
-    from isaaclab.sim.utils.stage import get_current_stage
-
-    mount_body = _find_camera_mount_body(robot.body_names)
-    base_path = f"/World/envs/env_0/Robot/{mount_body}"
-    d435_path = f"{base_path}/d435_link"
-
-    if get_current_stage().GetPrimAtPath(d435_path).IsValid():
-        parent_path = d435_path
-        offset = CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=(1.0, 0.0, 0.0, 0.0), convention="world")
-        mount_desc = f"{mount_body}/d435_link (real RealSense D435 mount)"
-    else:
-        parent_path = base_path
-        # NOTE: guessed offset - assumes this body's local frame points "forward" along +X like the
-        # robot root does (see _yaw_from_quat_wxyz). Verify the view actually looks forward once
-        # running; if not, adjust `rot` here (convention="world" means forward=+X/up=+Z in the
-        # parent body's own local frame).
-        offset = CameraCfg.OffsetCfg(pos=(0.1, 0.0, 0.1), rot=(1.0, 0.0, 0.0, 0.0), convention="world")
-        mount_desc = f"{mount_body} (no d435_link on this G1 build - using a guessed offset)"
+    torso_path = _robot_body_prim_path("torso_link")
+    half_pitch = math.radians(_NECK_CAMERA_PITCH_DEG) / 2.0
+    # convention="world": forward=+X/up=+Z in the parent link's frame; +pitch about +Y tilts +X down
+    offset = CameraCfg.OffsetCfg(
+        pos=_NECK_CAMERA_POS, rot=(math.cos(half_pitch), 0.0, math.sin(half_pitch), 0.0), convention="world"
+    )
+    mount_desc = f"{torso_path} neck (pos {_NECK_CAMERA_POS}, pitch {_NECK_CAMERA_PITCH_DEG:.0f} deg down)"
 
     camera_cfg = CameraCfg(
-        prim_path=f"{parent_path}/head_cam",
+        prim_path=f"{torso_path}/head_cam",
         update_period=0.0,
         height=height,
         width=width,
@@ -876,9 +1356,11 @@ def _attach_head_lidar(robot, scene) -> MultiMeshRayCaster:
     spinning lidars used for 2D SLAM) and return the live sensor object. Must be called after
     ``_spawn_room`` - the raycast mesh targets below need to already exist on the stage.
 
-    Reuses the same head/``d435_link`` mount discovery as ``_attach_head_camera`` (see that
-    function's docstring), and the same post-play-start init workaround (RayCaster sensors need the
-    identical ``_initialize_callback(None)`` + ``scene.sensors[...]`` registration trick as Camera).
+    Mounted on the asset's ``d435_link`` (a fixed sub-frame of the torso at head height - not a body,
+    so it never shows up in ``robot.body_names``) when present, else on the head/torso/pelvis body
+    itself, and uses the same post-play-start init workaround as ``_attach_head_camera`` (RayCaster
+    sensors need the identical ``_initialize_callback(None)`` + ``scene.sensors[...]`` registration
+    trick as Camera).
 
     Casts only against ``/World/ground`` and ``/World/room/*`` - the robot's own body is
     deliberately never a raycast target, so unlike the real sensor there's no self-occlusion to
@@ -888,7 +1370,7 @@ def _attach_head_lidar(robot, scene) -> MultiMeshRayCaster:
     from isaaclab.sim.utils.stage import get_current_stage
 
     mount_body = _find_camera_mount_body(robot.body_names)
-    base_path = f"/World/envs/env_0/Robot/{mount_body}"
+    base_path = _robot_body_prim_path(mount_body)
     d435_path = f"{base_path}/d435_link"
 
     if get_current_stage().GetPrimAtPath(d435_path).IsValid():
@@ -969,7 +1451,7 @@ def _encode_lidar_scan(lidar: MultiMeshRayCaster) -> LidarScan | None:
 # collision spheres - measured directly from assets/g1_full_collision.usd (4x radius-0.005m spheres
 # per foot, all at local z=-0.03, so sole = -0.03 - 0.005 = -0.035). Static: doesn't depend on the
 # leg's joint angles, only on this asset's own (fixed) foot collision geometry.
-_FOOT_SOLE_LOCAL_Z_OFFSET = -0.035
+FOOT_SOLE_LOCAL_Z_OFFSET = -0.035
 
 
 def _align_feet_to_ground(robot, foot_body_ids: list[int], ground_z: float, clearance: float) -> None:
@@ -977,7 +1459,7 @@ def _align_feet_to_ground(robot, foot_body_ids: list[int], ground_z: float, clea
     ``ground_z``. Must be called right after a pose has been written to the robot (so
     ``body_pos_w``/``body_quat_w`` reflect it) and from inside ``torch.inference_mode()``, matching
     the context ``env.reset()`` itself runs under."""
-    local_offset = torch.tensor([0.0, 0.0, _FOOT_SOLE_LOCAL_Z_OFFSET], device=robot.device)
+    local_offset = torch.tensor([0.0, 0.0, FOOT_SOLE_LOCAL_Z_OFFSET], device=robot.device)
     sole_world_z = []
     for body_id in foot_body_ids:
         rotated = quat_apply(robot.data.body_quat_w[0, body_id], local_offset)
@@ -1004,11 +1486,15 @@ class SharedState:
         self.lock = threading.Lock()
         self.mode = "stand"  # "stand" | "manual" | "goto" | "policy"
         self.gait = "stand"  # "stand" | "walk" | "run"
-        self.cmd_vel = (0.0, 0.0)  # (forward, turn) - heuristic units, see CpgGait
+        # (linear_x, linear_y, angular_z) as sent by the web UI's joystick, normalized by
+        # _LocomotionPolicyController.set_joystick
+        self.cmd_vel = (0.0, 0.0, 0.0)
         self.goto_target: tuple[float, float] | None = None
+        self.goto_speed = 0.0  # m/s from the web UI's velocity field, 0 = the gait's default
         self.home_requested = False
         self.reset_requested = False
         self.estop_requested = False
+        self.stand_requested = False
 
     def snapshot(self):
         with self.lock:
@@ -1051,6 +1537,9 @@ class G1SimBridgeDds:
         self._estop_reader = DataReader(
             self.participant, Topic(self.participant, TOPIC_EMERGENCY_STOP, Trigger), listener=dds_listener(self._on_estop)
         )
+        self._stand_reader = DataReader(
+            self.participant, Topic(self.participant, TOPIC_STAND_COMMAND, Trigger), listener=dds_listener(self._on_stand)
+        )
 
         self._pose_writer = DataWriter(self.participant, Topic(self.participant, TOPIC_ROBOT_POSE, RobotPose))
         self._joint_writer = DataWriter(self.participant, Topic(self.participant, TOPIC_JOINT_STATES, JointState))
@@ -1065,24 +1554,26 @@ class G1SimBridgeDds:
 
     def _on_cmd_vel(self, msg: CmdVel) -> None:
         with self.state.lock:
-            self.state.cmd_vel = (msg.linear_x, msg.angular_z)
-            if abs(msg.linear_x) > 0.05 or abs(msg.angular_z) > 0.05:
+            self.state.cmd_vel = (msg.linear_x, msg.linear_y, msg.angular_z)
+            if max(abs(msg.linear_x), abs(msg.linear_y), abs(msg.angular_z)) > 0.05:
                 self.state.mode = "manual"
                 if self.state.gait == "stand":
                     self.state.gait = "walk"
-            elif self.state.mode == "manual":
-                self.state.mode = "stand"
+            # releasing the joystick keeps 'manual' mode - the walking policy at zero velocity
 
     def _on_goto_command(self, msg: GotoCommand) -> None:
         with self.state.lock:
             self.state.mode = "goto"
             self.state.gait = msg.gait if msg.gait in ("walk", "run") else "walk"
             self.state.goto_target = (msg.x, msg.y)
+            self.state.goto_speed = max(0.0, msg.speed)
+        print(f"[g1_isaac_sim_bridge] DDS received g1/goto_command: ({msg.x:.2f}, {msg.y:.2f}) {msg.gait} speed={msg.speed:.2f}")
 
     def _on_goto_cancel(self, _msg: Trigger) -> None:
         with self.state.lock:
             if self.state.mode == "goto":
-                self.state.mode = "stand"
+                # walking policy: same stop-then-blend as the Stand button, not a hard switch
+                self.state.stand_requested = True
             self.state.goto_target = None
 
     def _on_policy_command(self, msg: PolicyCommand) -> None:
@@ -1102,6 +1593,11 @@ class G1SimBridgeDds:
         print("[g1_isaac_sim_bridge] DDS received g1/reset_sim -> will reset next loop iteration")
         with self.state.lock:
             self.state.reset_requested = True
+
+    def _on_stand(self, _msg: Trigger) -> None:
+        print("[g1_isaac_sim_bridge] DDS received g1/stand_command")
+        with self.state.lock:
+            self.state.stand_requested = True
 
     def _on_estop(self, _msg: Trigger) -> None:
         print("[g1_isaac_sim_bridge] DDS received g1/emergency_stop")
@@ -1212,19 +1708,37 @@ def main(env_cfg: DirectRLEnvCfg, experiment_cfg: dict):
         return reset_obs
 
     state = SharedState()
+    # the standing controller startup, reset/home and the Stand button all return to: the live Stand PPO
+    # policy when one is loaded (a plain PD hold of the default pose topples this robot), else 'stand'
+    # (that PD hold, of the _apply_trained_stand_defaults snapshot)
+    standing_mode = "policy" if args_cli.stand_policy_checkpoint else "stand"
     if args_cli.stand_policy_checkpoint:
-        # skip the "stand" (CpgGait, static-snapshot pose) default and go straight into 'policy' mode
+        # skip the "stand" (static-snapshot pose) default and go straight into 'policy' mode
         # (the Stand PPO policy, see _StandPolicyController) as soon as the robot loads - no need to
         # press the web UI's policy-play button first. Only when a stand policy was actually requested;
         # without --stand_policy_checkpoint the default stays "stand" (unchanged behavior).
         state.mode = "policy"
-    cpg = CpgGait(joint_names)
 
-    camera = (
-        None
-        if args_cli.no_camera
-        else _attach_head_camera(robot, unwrapped.scene, args_cli.camera_width, args_cli.camera_height)
-    )
+    camera = None
+    # reported in every g1/status so the web UI's CAM FEED panel can say *why* there's no picture
+    # instead of a bare "not connected"
+    camera_error = "disabled (--no_camera)" if args_cli.no_camera else None
+    if not args_cli.no_camera:
+        # the camera is a nice-to-have (see the per-step encode below) - a failure here shouldn't take
+        # the whole sim down with it, the robot is still drivable without a picture
+        try:
+            camera = _attach_head_camera(robot, unwrapped.scene, args_cli.camera_width, args_cli.camera_height)
+        except RuntimeError as exc:
+            cause = exc.__cause__ or exc
+            camera_error = f"{type(cause).__name__}: {cause}"
+            if int(np.__version__.split(".")[0]) >= 2:
+                # Isaac Sim 5.x's Replicator (omni.syntheticdata) is built against numpy 1.x - under
+                # numpy 2 every camera annotator fails to attach with "Unable to write from unknown dtype"
+                camera_error += (
+                    f" - numpy {np.__version__} is installed but Isaac Sim needs numpy 1.x "
+                    "(pip install 'numpy==1.26.4' 'opencv-python<4.11')"
+                )
+            print(f"[g1_isaac_sim_bridge] WARNING: head camera unavailable, continuing without it - {camera_error}")
     lidar = None if args_cli.no_lidar else _attach_head_lidar(robot, unwrapped.scene)
 
     node = G1SimBridgeDds(args_cli.dds_domain_id, state, joint_names)
@@ -1270,9 +1784,54 @@ def main(env_cfg: DirectRLEnvCfg, experiment_cfg: dict):
         )
         return stand_policy_controller
 
+    # built eagerly (unlike the two policies above) so it captures this robot's own gains/armature
+    # before any controller has touched them - see _LocomotionPolicyController.restore_default_gains.
+    loco_controller = _LocomotionPolicyController(
+        robot,
+        args_cli.loco_policy_dir,
+        device,
+        body_joint_ids,
+        action_scale,
+        step_dt,
+        args_cli.loco_transition_time,
+        args_cli.loco_warmup_time,
+        args_cli.loco_handover_time,
+    )
+
+    def drive_loco_to_target(goto_target, gait) -> float | None:
+        """Feed the locomotion policy this step's go-to-point velocity; on arrival, hand the robot to
+        'manual' at zero velocity - the walking policy keeps stepping in place, ready for the joystick
+        or the next Walk/Run (the Stand button still returns it to standing). Returns the distance
+        left (None once arrived)."""
+        if goto_target is None:
+            loco_controller.set_velocity_command(0.0, 0.0, 0.0)
+            return None
+        root_xy = (robot.data.root_pos_w[0, 0].item() - env_origin[0], robot.data.root_pos_w[0, 1].item() - env_origin[1])
+        yaw = _yaw_from_quat_wxyz(robot.data.root_quat_w[0])
+        with state.lock:
+            requested = state.goto_speed
+        speed = requested if requested > 0 else (_GOTO_RUN_SPEED if gait == "run" else _GOTO_WALK_SPEED)
+        speed = max(_GOTO_MIN_SPEED, min(_GOTO_RUN_SPEED, speed))
+        max_yaw_rate = loco_controller.cmd_ranges[2][1]
+        vx, wz, distance, arrived = _goto_velocity_command(root_xy, yaw, goto_target, speed, max_yaw_rate)
+        loco_controller.set_velocity_command(vx, 0.0, wz, linear_accel=_GOTO_ACCEL)
+        if arrived:
+            print(f"[g1_isaac_sim_bridge] Go-to: arrived at {goto_target} ({distance:.2f}m off) - stepping in place")
+            with state.lock:
+                state.goto_target = None
+                state.mode, state.cmd_vel = "manual", (0.0, 0.0, 0.0)
+        return distance
+
     obs = do_reset_and_align()
 
     step_counter = 0
+    # tracked so a "policy" -> anything-else mode change can restore normal actuator gain (see
+    # _StandPolicyController.restore_default_gains's own docstring for why this is needed: that
+    # policy overwrites legs/feet/waist stiffness/damping live every step it runs, and nothing else
+    # ever puts them back - without this, switching to manual/goto leaves those joints running on
+    # whatever (possibly very low) gain the policy last picked, so commanded targets barely move them
+    # even though the command itself is fine.
+    previous_mode = state.mode
     try:
         while simulation_app.is_running():
             loop_start = time.time()
@@ -1282,7 +1841,17 @@ def main(env_cfg: DirectRLEnvCfg, experiment_cfg: dict):
                 state.estop_requested = False
                 if do_estop:
                     state.mode, state.gait, state.goto_target = "stand", "stand", None
-                    state.cmd_vel = (0.0, 0.0)
+                    state.cmd_vel = (0.0, 0.0, 0.0)
+                do_stand = state.stand_requested
+                state.stand_requested = False
+                # the walking policy can't just be switched off mid-stride (see
+                # _LocomotionPolicyController.request_stop/handover_step) - it stays in 'manual' until
+                # its hand-over finishes; any other mode goes straight to the standing controller
+                stand_via_loco = do_stand and state.mode in ("manual", "goto")
+                if do_stand:
+                    state.cmd_vel, state.goto_target = (0.0, 0.0, 0.0), None
+                    if not stand_via_loco:
+                        state.mode, state.gait = standing_mode, "stand"
                 do_reset = state.home_requested or state.reset_requested
                 state.home_requested = False
                 state.reset_requested = False
@@ -1295,9 +1864,15 @@ def main(env_cfg: DirectRLEnvCfg, experiment_cfg: dict):
                     # falling back to static "stand" here would hold isaaclab_assets' untrained
                     # open-loop pose/gain instead, which just topples over. Mirrors the same
                     # conditional main() already uses for the very first reset at startup.
-                    reset_mode = "policy" if args_cli.stand_policy_checkpoint else "stand"
-                    state.mode, state.gait, state.goto_target = reset_mode, "stand", None
-                    state.cmd_vel = (0.0, 0.0)
+                    state.mode, state.gait, state.goto_target = standing_mode, "stand", None
+                    state.cmd_vel = (0.0, 0.0, 0.0)
+            if stand_via_loco:
+                if args_cli.stand_policy_checkpoint:
+                    loco_controller.request_stop()
+                else:
+                    # no Stand PPO to hand over to, and a plain PD hold of the default pose falls over
+                    # (verified in sim) - the walking policy at zero velocity *is* the safe stand here
+                    print("[g1_isaac_sim_bridge] Stand: no --stand_policy_checkpoint, holding the walking policy at zero velocity")
             if do_reset:
                 # bracket the actual physics reset with position printouts so a "reset looks like
                 # it did nothing" report can be immediately split into "the sim didn't move the
@@ -1312,11 +1887,24 @@ def main(env_cfg: DirectRLEnvCfg, experiment_cfg: dict):
                 obs = do_reset_and_align()
                 after_xy = (robot.data.root_pos_w[0, 0].item(), robot.data.root_pos_w[0, 1].item())
                 print(f"[g1_isaac_sim_bridge] Reset complete - position after: ({after_xy[0]:.2f}, {after_xy[1]:.2f})")
-                cpg.phase = 0.0
                 if stand_policy_controller is not None:
                     stand_policy_controller.reset()
 
             mode, gait, cmd_vel, goto_target = state.snapshot()
+            # joystick ('manual') and go-to-point ('goto') both drive the same locomotion policy -
+            # switching between the two doesn't restart its walk-in
+            uses_loco = mode in ("manual", "goto")
+            # entering first: begin_transition() blends from the gains in effect *right now*, before
+            # the Stand policy's restore below overwrites them (its blend then rewrites them anyway)
+            if uses_loco and (previous_mode not in ("manual", "goto") or loco_controller.phase == "idle"):
+                loco_controller.begin_transition()
+            if previous_mode == "policy" and mode != "policy" and stand_policy_controller is not None:
+                print("[g1_isaac_sim_bridge] Leaving 'policy' mode - restoring legs/feet/waist actuator gain to default")
+                stand_policy_controller.restore_default_gains()
+            if not uses_loco and loco_controller.phase != "idle":
+                print("[g1_isaac_sim_bridge] Leaving locomotion policy - restoring actuator gain/armature to default")
+                loco_controller.restore_default_gains()
+            previous_mode = mode
             distance_to_target = None
 
             with torch.inference_mode():
@@ -1327,33 +1915,25 @@ def main(env_cfg: DirectRLEnvCfg, experiment_cfg: dict):
                     action = ensure_stand_policy_loaded().step()
                 elif mode == "policy":
                     action = _agent_act(ensure_policy_loaded(), obs["policy"])
-                else:
-                    if mode == "goto" and goto_target is not None:
-                        root_xy = (
-                            robot.data.root_pos_w[0, 0].item() - env_origin[0],
-                            robot.data.root_pos_w[0, 1].item() - env_origin[1],
-                        )
-                        yaw = _yaw_from_quat_wxyz(robot.data.root_quat_w[0])
-                        max_speed = 0.6 if gait == "walk" else 1.2
-                        forward, turn, distance_to_target, arrived = _goto_command(
-                            root_xy, yaw, goto_target, max_speed
-                        )
-                        if arrived:
+                elif uses_loco:
+                    if loco_controller.ready_for_handover:
+                        ensure_stand_policy_loaded().reset()
+                        loco_controller.begin_handover()
+                    if loco_controller.phase == "handover":
+                        action = loco_controller.handover_step(ensure_stand_policy_loaded().step)
+                        if loco_controller.handover_done:
                             with state.lock:
-                                state.mode, state.goto_target = "stand", None
-                            gait_for_cpg = "stand"
-                        else:
-                            gait_for_cpg = gait
-                    elif mode == "manual":
-                        forward, turn = cmd_vel
-                        gait_for_cpg = gait
+                                if state.mode in ("manual", "goto"):
+                                    state.mode, state.gait, state.goto_target = "policy", "stand", None
                     else:
-                        forward, turn, gait_for_cpg = 0.0, 0.0, "stand"
-
-                    offsets = cpg.step(step_dt, forward, turn, gait_for_cpg)
-                    action = torch.tensor(
-                        [[offset / action_scale for offset in offsets]], device=device, dtype=torch.float32
-                    )
+                        if mode == "goto":
+                            distance_to_target = drive_loco_to_target(goto_target, gait)
+                        else:
+                            loco_controller.set_joystick(*cmd_vel)
+                        action = loco_controller.step()
+                else:
+                    # 'stand': zero action = PD hold of the default pose
+                    action = torch.zeros(1, len(body_joint_ids), device=device)
 
                 obs, _, _, _, _ = env.step(action)
                 # never let the AMP task's fixed episode_length_s timeout auto-reset the robot - the
@@ -1369,6 +1949,12 @@ def main(env_cfg: DirectRLEnvCfg, experiment_cfg: dict):
                     "target": list(goto_target) if goto_target else None,
                     "distance_to_target": distance_to_target,
                     "policy_loaded": skrl_agent is not None,
+                    # 'policy' mode runs the Stand PPO policy (not the AMP dance) when this is set - the
+                    # web UI shows that as Standing
+                    "stand_policy": bool(args_cli.stand_policy_checkpoint),
+                    "loco": loco_controller.status(),
+                    "goto_speed": state.goto_speed,
+                    "camera_error": camera_error,
                 }
                 node.publish_telemetry(
                     (root_pos[0].item() - env_origin[0], root_pos[1].item() - env_origin[1]),
